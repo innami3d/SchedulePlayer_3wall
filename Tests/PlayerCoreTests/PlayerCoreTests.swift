@@ -94,3 +94,94 @@ extension PlayerCoreTests {
         XCTAssertNil(restored.displayUUID)
     }
 }
+
+extension PlayerCoreTests {
+    private var scheduleCalendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        return calendar
+    }
+    private func date(_ hour: Int, _ minute: Int = 0, _ second: Int = 0) -> Date {
+        scheduleCalendar.date(from: DateComponents(year: 2026, month: 10, day: 31, hour: hour, minute: minute, second: second))!
+    }
+    func testResumeInitialPlaylistAndTrackLoopPosition() throws {
+        var (project, a, b) = fixture()
+        a.start = .init(hour: 16); b.start = .init(hour: 20)
+        project.playlists = [a, b]; project.video.initialPlaylistID = a.id
+        let playback = try XCTUnwrap(DailyScheduler.playback(project: project, lane: .video, at: date(17, 1, 15), now: 100, calendar: scheduleCalendar))
+        XCTAssertEqual(playback.state.playlistID, a.id)
+        XCTAssertEqual(playback.elapsed, 3675)
+        let position = try XCTUnwrap(ScheduledTrackPosition.resolve(durations: [20, 30], elapsed: playback.elapsed))
+        XCTAssertEqual(position.index, 1); XCTAssertEqual(position.offset, 5)
+        XCTAssertEqual(ScheduledTrackPosition.resolve(durations: [20, 30], elapsed: 50)?.index, 0)
+        XCTAssertEqual(ScheduledTrackPosition.resolve(durations: [20, 30], elapsed: 20)?.index, 1)
+        XCTAssertNil(ScheduledTrackPosition.resolve(durations: [0], elapsed: 2))
+    }
+    func testResumePlaylistSwitchIncludesOutgoingFadeAndPriority() throws {
+        var (project, a, b) = fixture()
+        a.start = .init(hour: 17); a.fades.fadeOut = 4
+        b.start = .init(hour: 18); b.scheduleOrder = 2
+        var losing = b.duplicated(order: 1); losing.start = b.start
+        project.playlists = [a, losing, b]; project.video.initialPlaylistID = a.id
+        let transition = try XCTUnwrap(DailyScheduler.playback(project: project, lane: .video, at: date(18, 0, 2), now: 100, calendar: scheduleCalendar))
+        XCTAssertEqual(transition.state.playlistID, a.id); XCTAssertEqual(transition.state.pendingID, b.id)
+        XCTAssertEqual(transition.elapsed, 3602)
+        let playing = try XCTUnwrap(DailyScheduler.playback(project: project, lane: .video, at: date(18, 0, 10), now: 100, calendar: scheduleCalendar))
+        XCTAssertEqual(playing.state.playlistID, b.id); XCTAssertEqual(playing.elapsed, 6)
+        XCTAssertEqual(playing.state.phase, .playing)
+        // A playlist scheduled at output start loses to the configured initial playlist.
+        project.video.initialPlaylistID = b.id
+        let start = try XCTUnwrap(DailyScheduler.playback(project: project, lane: .video, at: date(17), now: 100, calendar: scheduleCalendar))
+        XCTAssertEqual(start.state.playlistID, b.id)
+    }
+    func testResumeOvernightAndOutputWindowBoundaries() throws {
+        var (project, a, b) = fixture()
+        project.video.start = .init(hour: 22); project.video.end = .init(hour: 6)
+        a.start = .init(hour: 22); b.start = .init(hour: 1)
+        project.video.initialPlaylistID = a.id; project.playlists = [a, b]
+        let midnight = try XCTUnwrap(DailyScheduler.playback(project: project, lane: .video, at: date(0, 30), now: 100, calendar: scheduleCalendar))
+        XCTAssertEqual(midnight.state.playlistID, a.id); XCTAssertEqual(midnight.elapsed, 9000)
+        let later = try XCTUnwrap(DailyScheduler.playback(project: project, lane: .video, at: date(2), now: 100, calendar: scheduleCalendar))
+        XCTAssertEqual(later.state.playlistID, b.id); XCTAssertEqual(later.elapsed, 3598)
+        XCTAssertNil(DailyScheduler.playback(project: project, lane: .video, at: date(6), now: 100, calendar: scheduleCalendar))
+        XCTAssertNil(DailyScheduler.playback(project: project, lane: .video, at: date(12), now: 100, calendar: scheduleCalendar))
+        project.video.end = project.video.start
+        XCTAssertNil(DailyScheduler.playback(project: project, lane: .video, at: date(22), now: 100, calendar: scheduleCalendar))
+    }
+    func testResumeIndependentAudioAndIgnoredEmptyPlaylist() throws {
+        var (project, a, _) = fixture()
+        a.start = .init(hour: 17)
+        var empty = Playlist(name: "Empty", lane: .video); empty.start = .init(hour: 18)
+        var audio = Playlist(name: "Audio", lane: .audio); audio.start = .init(hour: 19)
+        audio.tracks = [.init(path: "sound.wav", kind: .audio)]
+        project.playlists = [a, empty, audio]; project.video.initialPlaylistID = a.id
+        project.audio.start = .init(hour: 18); project.audio.initialPlaylistID = audio.id
+        let video = try XCTUnwrap(DailyScheduler.playback(project: project, lane: .video, at: date(18, 30), now: 100, calendar: scheduleCalendar))
+        let sound = try XCTUnwrap(DailyScheduler.playback(project: project, lane: .audio, at: date(18, 30), now: 100, calendar: scheduleCalendar))
+        XCTAssertEqual(video.state.playlistID, a.id); XCTAssertEqual(video.elapsed, 5400)
+        XCTAssertEqual(sound.state.playlistID, audio.id); XCTAssertEqual(sound.elapsed, 1800)
+    }
+}
+
+extension PlayerCoreTests {
+    func testResumePlaylistBeforeDefaultStartUntilNextEventAndDailyStop() throws {
+        var (project, initial, early) = fixture()
+        initial.start = .init(hour: 17); initial.fades = .init(fadeIn: 0, fadeOut: 0)
+        early.name = "aa"; early.start = .init(hour: 13, minute: 58)
+        early.fades = .init(fadeIn: 0, fadeOut: 0)
+        project.playlists = [initial, early]; project.video.initialPlaylistID = initial.id
+        XCTAssertNil(DailyScheduler.playback(project: project, lane: .video, at: date(13, 57), now: 100, calendar: scheduleCalendar))
+        let resumed = try XCTUnwrap(DailyScheduler.playback(project: project, lane: .video, at: date(14, 15), now: 100, calendar: scheduleCalendar))
+        XCTAssertEqual(resumed.state.playlistID, early.id)
+        XCTAssertEqual(resumed.elapsed, 17 * 60)
+        let next = try XCTUnwrap(DailyScheduler.playback(project: project, lane: .video, at: date(17, 1), now: 100, calendar: scheduleCalendar))
+        XCTAssertEqual(next.state.playlistID, initial.id); XCTAssertEqual(next.elapsed, 60)
+        XCTAssertNil(DailyScheduler.playback(project: project, lane: .video, at: date(22), now: 100, calendar: scheduleCalendar))
+        XCTAssertNil(DailyScheduler.playback(project: project, lane: .video, at: date(23), now: 100, calendar: scheduleCalendar))
+        early.start = .init(hour: 23); project.playlists[1] = early
+        let afterStop = try XCTUnwrap(DailyScheduler.playback(project: project, lane: .video, at: date(23, 1), now: 100, calendar: scheduleCalendar))
+        XCTAssertEqual(afterStop.state.playlistID, early.id); XCTAssertEqual(afterStop.elapsed, 60)
+        let midnight = try XCTUnwrap(DailyScheduler.playback(project: project, lane: .video, at: date(0, 1), now: 100, calendar: scheduleCalendar))
+        XCTAssertEqual(midnight.state.playlistID, early.id); XCTAssertEqual(midnight.elapsed, 3660)
+    }
+}

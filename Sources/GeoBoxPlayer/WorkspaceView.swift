@@ -17,7 +17,9 @@ struct WorkspaceView: View {
                     } else {
                         PlaylistEditor(store: store, engine: engine, library: library)
                     }
-                }.frame(minWidth: 650, maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .id(store.showingProject ? "project" : store.selectedPlaylistID?.uuidString ?? "project")
+                .frame(minWidth: 650, maxWidth: .infinity, maxHeight: .infinity)
             }
             Divider()
             outputPreview
@@ -77,8 +79,14 @@ struct WorkspaceView: View {
     private var sidebar: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                Button { store.showingProject = true } label: { Label("プロジェクト設定", systemImage: "slider.horizontal.3").frame(maxWidth: .infinity, alignment: .leading) }
-                    .buttonStyle(.bordered).padding(.bottom, 4)
+                Button { store.selectProject() } label: {
+                    Label("プロジェクト設定", systemImage: "slider.horizontal.3")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                        .background(store.showingProject ? Color.accentColor.opacity(0.14) : Color.clear, in: RoundedRectangle(cornerRadius: 7))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).padding(.bottom, 4)
                 ForEach(MediaLane.allCases) { lane in
                     VStack(alignment: .leading, spacing: 6) {
                         Text("\(lane.title)プレイリスト").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 8)

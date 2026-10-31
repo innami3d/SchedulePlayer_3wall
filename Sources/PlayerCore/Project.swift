@@ -1,6 +1,6 @@
 import Foundation
 
-public enum MediaLane: String, Codable, CaseIterable, Identifiable {
+public enum MediaLane: String, Codable, CaseIterable, Identifiable, Sendable {
     case video, audio
     public var id: String { rawValue }
     public var title: String { self == .video ? "映像" : "音声" }

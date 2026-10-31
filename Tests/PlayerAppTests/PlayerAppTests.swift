@@ -99,7 +99,7 @@ extension PlayerAppTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = PlayerStore(restoreLastProject: false)
         store.createPlaylist(.video); store.addFiles([directory.appendingPathComponent("clip.mov")])
-        store.fileURL = directory.appendingPathComponent("project.geobox.json")
+        store.fileURL = directory.appendingPathComponent("project.player")
         XCTAssertTrue(store.save())
         let read = try PlayerProject.decode(Data(contentsOf: store.fileURL!))
         XCTAssertEqual(read.playlists[0].tracks[0].path, "clip.mov")
@@ -179,5 +179,133 @@ extension PlayerAppTests {
         engine.endProject()
         engine.reconnectDevices()
         XCTAssertFalse(engine.audioGate.active, "A device becoming available must not restart a stopped output")
+    }
+}
+
+extension PlayerAppTests {
+    @MainActor func testScheduledRecoverySeeksAudioAfterPreparationAndRespectsStop() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("resume.wav")
+        let format = AVAudioFormat(standardFormatWithSampleRate: 8000, channels: 1)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8000 * 120)!
+        buffer.frameLength = buffer.frameCapacity
+        memset(buffer.floatChannelData![0], 0, Int(buffer.frameLength) * MemoryLayout<Float>.size)
+        do { let file = try AVAudioFile(forWriting: url, settings: format.settings); try file.write(from: buffer) }
+        let store = PlayerStore(restoreLastProject: false)
+        defer { store.engine.stopImmediately() }
+        let date = Date()
+        store.project.video.end = store.project.video.start // Do not open a display during the test.
+        store.project.audio.start = .at(date.addingTimeInterval(-60))
+        store.project.audio.end = .at(date.addingTimeInterval(60))
+        store.project.audio.fades = .init(fadeIn: 0, fadeOut: 0)
+        var playlist = Playlist(name: "Scheduled audio", lane: .audio)
+        playlist.tracks = [.init(path: url.path, kind: .audio)]
+        playlist.start = store.project.audio.start
+        store.project.playlists = [playlist]; store.project.audio.initialPlaylistID = playlist.id
+        store.engine.resetSchedule(reconcile: true)
+        store.engine.tick()
+        XCTAssertFalse(store.engine.audioGate.active, "Wait for metadata before starting recovery")
+        store.prepareMedia()
+        for _ in 0..<250 {
+            store.engine.tick()
+            if store.engine.audioMedia.ready { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(store.engine.audioState.playlistID, playlist.id)
+        XCTAssertEqual(store.engine.audioMedia.trackID, playlist.tracks[0].id)
+        XCTAssertTrue(store.engine.audioMedia.ready)
+        XCTAssertEqual(store.engine.audioMedia.player.currentTime().seconds, 60, accuracy: 3)
+        XCTAssertFalse(store.engine.videoGate.active)
+        store.engine.endProject()
+        store.engine.tick()
+        XCTAssertFalse(store.engine.audioGate.active)
+        // A manual stop also cancels recovery still waiting for metadata.
+        store.engine.resetSchedule(reconcile: true)
+        store.engine.endProject()
+        store.engine.tick(now: ProcessInfo.processInfo.systemUptime + 1)
+        XCTAssertFalse(store.engine.audioGate.active)
+    }
+}
+
+extension PlayerAppTests {
+    @MainActor func testPreviewWithoutOutputDevicesForManualProjectAndScheduledPlayback() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("preview.png")
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 8, pixelsHigh: 8, bitsPerSample: 8, samplesPerPixel: 4,
+                                      hasAlpha: true, isPlanar: false, colorSpaceName: .calibratedRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        try bitmap.representation(using: .png, properties: [:])!.write(to: url)
+        let store = PlayerStore(restoreLastProject: false)
+        let engine = store.engine
+        defer { engine.stopImmediately() }
+        store.project.video.fades = .init(fadeIn: 0, fadeOut: 0)
+        store.project.audio.fades = .init(fadeIn: 0, fadeOut: 0)
+        var playlist = Playlist(name: "Preview", lane: .video)
+        playlist.fades = .init(fadeIn: 0, fadeOut: 0)
+        playlist.tracks = [.init(path: url.path, kind: .image, imageDuration: 120)]
+        store.project.playlists = [playlist]; store.project.video.initialPlaylistID = playlist.id
+        store.prepareMedia()
+        for _ in 0..<100 {
+            if store.library.prepared(url) != nil { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertNotNil(store.library.prepared(url))
+        // No display or audio device has been explicitly selected.
+        engine.play(playlist.id); engine.tick()
+        XCTAssertEqual(engine.videoState.playlistID, playlist.id)
+        XCTAssertNotNil(engine.videoMedia.image)
+        XCTAssertEqual(engine.videoOpacity, 1)
+        XCTAssertFalse(engine.videoDisconnected)
+        XCTAssertTrue(engine.status.contains("プレビューのみ"))
+        XCTAssertNil(store.error)
+        engine.stopImmediately()
+        // An unavailable saved audio device must not prevent video preview either.
+        store.project.audioDeviceUID = "missing-" + UUID().uuidString
+        engine.startProject(); engine.tick()
+        XCTAssertEqual(engine.videoState.playlistID, playlist.id)
+        XCTAssertEqual(engine.videoOpacity, 1)
+        XCTAssertTrue(engine.audioDisconnected)
+        XCTAssertTrue(engine.videoMedia.player.isMuted)
+        XCTAssertTrue(engine.audioMedia.player.isMuted)
+        XCTAssertNil(store.error)
+        engine.stopImmediately()
+        // Automatic startup recovery shares the same output-independent preview behavior.
+        let date = Date()
+        store.project.video.start = .at(date.addingTimeInterval(-5))
+        store.project.video.end = .at(date.addingTimeInterval(60))
+        store.project.playlists[0].start = store.project.video.start
+        store.project.audio.end = store.project.audio.start
+        engine.resetSchedule(reconcile: true); engine.tick()
+        XCTAssertEqual(engine.videoState.playlistID, playlist.id)
+        XCTAssertNotNil(engine.videoMedia.image)
+        XCTAssertEqual(engine.videoOpacity, 1)
+        XCTAssertFalse(engine.videoDisconnected)
+        let started = try XCTUnwrap(engine.videoMedia.started)
+        XCTAssertEqual(ProcessInfo.processInfo.systemUptime - started, 5, accuracy: 1.5)
+    }
+}
+
+extension PlayerAppTests {
+    @MainActor func testSaveOverwritesOpenedProjectsIncludingLegacyExtensions() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for filename in ["existing.player", "legacy.geobox.json", "existing.json"] {
+            let url = directory.appendingPathComponent(filename)
+            var original = PlayerProject(); original.name = "Before"
+            try original.encoded().write(to: url)
+            let store = PlayerStore(restoreLastProject: false)
+            store.openProject(at: url)
+            store.change { $0.name = "After" }
+            XCTAssertTrue(store.isDirty)
+            XCTAssertTrue(store.save())
+            XCTAssertEqual(store.fileURL, url)
+            XCTAssertFalse(store.isDirty)
+            XCTAssertEqual(try PlayerProject.decode(Data(contentsOf: url)).name, "After")
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).count, 3)
     }
 }

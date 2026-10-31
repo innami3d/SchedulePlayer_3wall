@@ -25,9 +25,18 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <key>NSPrincipalClass</key><string>NSApplication</string>
 <key>CFBundleDocumentTypes</key><array><dict>
 <key>CFBundleTypeName</key><string>GeoBox Project</string>
-<key>CFBundleTypeExtensions</key><array><string>json</string></array>
+<key>LSItemContentTypes</key><array><string>jp.namipi.geobox-player.project</string></array>
+<key>CFBundleTypeExtensions</key><array><string>player</string></array>
 <key>CFBundleTypeRole</key><string>Editor</string>
 </dict></array>
+<key>UTExportedTypeDeclarations</key><array><dict>
+<key>UTTypeIdentifier</key><string>jp.namipi.geobox-player.project</string>
+<key>UTTypeDescription</key><string>GeoBox Player Project</string>
+<key>UTTypeConformsTo</key><array><string>public.json</string></array>
+<key>UTTypeTagSpecification</key><dict>
+<key>public.filename-extension</key><array><string>player</string></array>
+<key>public.mime-type</key><string>application/json</string>
+</dict></dict></array>
 </dict></plist>
 PLIST
 codesign --force --sign - --identifier jp.namipi.GeoBoxPlayer "$APP_DIR"
