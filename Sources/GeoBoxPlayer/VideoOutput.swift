@@ -67,6 +67,6 @@ struct PreviewSurface: NSViewRepresentable {
     func makeNSView(context: Context) -> VideoSurface { VideoSurface(frame: .zero) }
     func updateNSView(_ view: VideoSurface, context: Context) {
         view.update(player: engine.videoMedia.player, image: engine.videoMedia.image, opacity: engine.videoOpacity,
-                    color: NSColor(hex: engine.store?.project.fadeColorHex ?? "#000000"), visible: engine.videoState.active)
+                    color: NSColor(hex: engine.videoFadeColorHex), visible: engine.videoState.active)
     }
 }

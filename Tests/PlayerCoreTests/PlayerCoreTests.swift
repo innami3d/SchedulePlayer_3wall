@@ -2,6 +2,36 @@ import XCTest
 @testable import PlayerCore
 
 final class PlayerCoreTests: XCTestCase {
+    func testLegacyPlaylistPlaybackSettingsMigrationAndIndependentRoundTrip() throws {
+        var project = PlayerProject()
+        project.defaults.videoTrackFades = .init(fadeIn: 3, fadeOut: 4)
+        project.defaults.audioTrackFades = .init(fadeIn: 5, fadeOut: 6)
+        project.fadeColorHex = "#123456"
+        project.playlists = [Playlist(name: "A", lane: .video), Playlist(name: "B", lane: .audio)]
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: project.encoded()) as? [String: Any])
+        var playlists = try XCTUnwrap(legacy["playlists"] as? [[String: Any]])
+        for index in playlists.indices { playlists[index].removeValue(forKey: "playbackSettings") }
+        legacy["playlists"] = playlists
+        var migrated = try PlayerProject.decode(JSONSerialization.data(withJSONObject: legacy))
+        for playlist in migrated.playlists {
+            XCTAssertEqual(playlist.playbackSettings.videoTrackFades, project.defaults.videoTrackFades)
+            XCTAssertEqual(playlist.playbackSettings.audioTrackFades, project.defaults.audioTrackFades)
+            XCTAssertEqual(playlist.playbackSettings.fadeColorHex, "#123456")
+        }
+        migrated.playlists[0].playbackSettings.videoTrackFades.fadeIn = 9
+        migrated.playlists[0].playbackSettings.fadeColorHex = "#ABCDEF"
+        XCTAssertEqual(migrated.playlists[1].playbackSettings.videoTrackFades.fadeIn, 3)
+        XCTAssertEqual(migrated.playlists[1].playbackSettings.fadeColorHex, "#123456")
+        XCTAssertEqual(try PlayerProject.decode(migrated.encoded()), migrated)
+        XCTAssertEqual(migrated.playlists[0].duplicated(order: 2).playbackSettings, migrated.playlists[0].playbackSettings)
+        var invalid = migrated
+        invalid.playlists[0].playbackSettings.audioTrackFades.fadeOut = 61
+        XCTAssertThrowsError(try invalid.validate())
+        invalid = migrated
+        invalid.playlists[1].playbackSettings.fadeColorHex = "invalid"
+        XCTAssertThrowsError(try invalid.validate())
+    }
+
     func fixture() -> (PlayerProject, Playlist, Playlist) {
         var project = PlayerProject()
         var a = Playlist(name: "A", lane: .video)

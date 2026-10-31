@@ -1,0 +1,6 @@
+Generated with the built-in image_gen tool.
+
+Use case: logo-brand
+Asset type: production macOS application icon for GeoBox Player, a scheduled media player for a three-wall video projection installation.
+Primary request: Create one polished, distinctive macOS app icon. A dark graphite rounded-square tile with a sculptural luminous geometric cube formed from three screen-like planes, and a clear play triangle integrated into the front-facing plane. Restrained cyan / blue illumination, precise bevels, subtle dimensional depth, crisp silhouette. Professional audiovisual control software aesthetic, calm and premium.
+Composition: single centered icon, front view, square 1024x1024 image; rounded-square tile occupies about 88% of canvas with even transparent margins; generous internal breathing room. Large simple geometry legible at 16 and 32 pixels. No text, letters, numbers, clock dials, tiny detail, additional objects, device mockup, watermark or cast shadow outside tile. Actual transparent background outside the tile.

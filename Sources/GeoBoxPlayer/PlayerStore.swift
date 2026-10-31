@@ -36,7 +36,11 @@ final class PlayerStore: ObservableObject {
         remembersProject = restoreLastProject
         if restoreLastProject, let path = UserDefaults.standard.string(forKey: recentProjectKey) {
             let url = URL(fileURLWithPath: path)
-            do { project = try PlayerProject.decode(Data(contentsOf: url)); fileURL = url }
+            do {
+                project = try PlayerProject.decode(Data(contentsOf: url))
+                project.name = url.deletingPathExtension().lastPathComponent
+                fileURL = url
+            }
             catch { message = "前回のプロジェクトを開けませんでした：\(error.localizedDescription)" }
         }
     }
@@ -231,7 +235,8 @@ final class PlayerStore: ObservableObject {
     }
     private func loadProject(at url: URL) {
         do {
-            let next = try PlayerProject.decode(Data(contentsOf: url))
+            var next = try PlayerProject.decode(Data(contentsOf: url))
+            next.name = url.deletingPathExtension().lastPathComponent
             engine.stopImmediately(); project = next; fileURL = url; isDirty = false
             undoStack.removeAll(); redoStack.removeAll(); selectedPlaylistID = nil; selectedTrackID = nil
             showingProject = true; prepareMedia(); engine.resetSchedule(reconcile: true)
@@ -250,6 +255,7 @@ final class PlayerStore: ObservableObject {
             rememberDeviceIdentities()
             try project.validate()
             var saved = project
+            saved.name = destination.deletingPathExtension().lastPathComponent
             let base = destination.deletingLastPathComponent().standardizedFileURL.path + "/"
             for i in saved.playlists.indices {
                 for j in saved.playlists[i].tracks.indices {
