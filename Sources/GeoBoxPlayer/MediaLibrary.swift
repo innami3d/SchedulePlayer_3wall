@@ -24,6 +24,8 @@ final class MediaLibrary: ObservableObject {
     @Published private(set) var states: [URL: State] = [:]
     private var signatures: [URL: String] = [:]
     private var task: Task<Void, Never>?
+    private var generation = 0
+    private var preparing = false
     private let images = NSCache<NSURL, NSImage>()
     init() { images.totalCostLimit = 256 * 1024 * 1024 }
     var summary: String {
@@ -43,6 +45,7 @@ final class MediaLibrary: ObservableObject {
     }
     func prepare(project: PlayerProject, directory: URL?) {
         task?.cancel()
+        generation += 1; let currentGeneration = generation; preparing = true
         let tracks = project.playlists.flatMap(\.tracks)
         var unique: [URL: MediaKind] = [:]
         for track in tracks { unique[track.resolvedURL(relativeTo: directory)] = track.kind }
@@ -50,6 +53,7 @@ final class MediaLibrary: ObservableObject {
         states = states.filter { retained.contains($0.key) }; signatures = signatures.filter { retained.contains($0.key) }
         task = Task { [weak self] in
             guard let self else { return }
+            defer { if generation == currentGeneration { preparing = false } }
             for (url, kind) in unique.sorted(by: { $0.key.path < $1.key.path }) {
                 if Task.isCancelled { return }
                 do {
@@ -86,6 +90,18 @@ final class MediaLibrary: ObservableObject {
                     guard !Task.isCancelled else { return }
                     states[url] = .failed(error.localizedDescription)
                 }
+            }
+        }
+    }
+    func refreshIfChanged(project: PlayerProject, directory: URL?) {
+        guard !preparing else { return }
+        for track in project.playlists.flatMap(\.tracks) {
+            let url = track.resolvedURL(relativeTo: directory)
+            if let info = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]) {
+                let signature = "\(info.contentModificationDate?.timeIntervalSince1970 ?? 0):\(info.fileSize ?? 0)"
+                if signature != signatures[url] { prepare(project: project, directory: directory); return }
+            } else if case .ready = states[url] {
+                prepare(project: project, directory: directory); return
             }
         }
     }

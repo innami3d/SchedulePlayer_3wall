@@ -137,6 +137,7 @@ struct TimeField: View {
                 .onAppear { draft = value.text }
                 .onChange(of: focused) { _, now in if !now { commit() } }
                 .onChange(of: value) { _, now in if !focused { draft = now.text } }
+                .onChange(of: draft) { _, now in if focused, let parsed = TimeOfDay(text: now), parsed != value { value = parsed } }
             if invalid { Text("00:00:00〜23:59:59で入力").font(.caption).foregroundStyle(.red) }
         }
     }

@@ -53,7 +53,7 @@ public struct LanePlayback {
         envelope = Envelope(from: 0, to: 1, started: now, duration: next.fades.fadeIn)
     }
     public mutating func tick(project: PlayerProject, now: TimeInterval) {
-        guard project.playlist(playlistID) != nil else { stop(); return }
+        guard let current = project.playlist(playlistID), !current.tracks.isEmpty else { stop(); return }
         guard envelope.completed(at: now) else { return }
         if phase == .fadingOut {
             let next = project.playlist(pendingID)

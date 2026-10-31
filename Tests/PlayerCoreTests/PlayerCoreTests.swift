@@ -50,6 +50,9 @@ final class PlayerCoreTests: XCTestCase {
         state.request(b, project: project, now: 0); XCTAssertEqual(state.playlistID, b.id)
         var empty = b; empty.tracks = []; state.request(empty, project: project, now: 1)
         XCTAssertEqual(state.playlistID, b.id)
+        project.playlists[1].tracks = []
+        state.tick(project: project, now: 2)
+        XCTAssertFalse(state.active)
     }
     func testOutputEndStartsAtTimeAndStopsAfterFade() {
         var gate = OutputGate(); gate.start(duration: 0, now: 0)

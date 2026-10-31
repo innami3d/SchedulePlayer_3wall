@@ -43,6 +43,7 @@ final class PlaybackEngine: ObservableObject {
     private var appliedAudioUID: String?
     private var appliedDisplay: UInt32?
     private var appliedRate: Double?
+    private var shuttingDown = false
     var videoOpacity: Double = 0
     var status: String {
         "映像：\(videoState.phase.title) ／ 音声：\(audioState.phase.title)"
@@ -62,7 +63,16 @@ final class PlaybackEngine: ObservableObject {
         }
         if let timer { RunLoop.main.add(timer, forMode: .common) }
     }
-    func resetSchedule() { lastScheduleDate = Date() }
+    func resetSchedule() { lastScheduleDate = Date(); shuttingDown = false }
+    var outputIsActive: Bool { videoGate.active || audioGate.active }
+    func shutdown() async {
+        shuttingDown = true; endProject(manual: false)
+        while outputIsActive {
+            try? await Task.sleep(for: .milliseconds(20))
+            tick()
+        }
+        timer?.invalidate(); timer = nil; stopImmediately()
+    }
     func play(_ id: UUID) {
         guard let store, !store.locked, let playlist = store.project.playlist(id) else { return }
         let now = ProcessInfo.processInfo.systemUptime
@@ -72,7 +82,10 @@ final class PlaybackEngine: ObservableObject {
                 if !audioGate.active { try openAudio(); audioGate.start(duration: store.project.audio.fades.fadeIn, now: now) }
             } else if !audioGate.active { try openAudio(); audioGate.start(duration: store.project.audio.fades.fadeIn, now: now) }
             request(playlist, now: now)
-        } catch { store.error = error.localizedDescription }
+        } catch {
+            if !videoState.active { videoGate.stop(); output.close(); store.devices.restoreModes(); appliedDisplay = nil; appliedRate = nil }
+            store.error = error.localizedDescription
+        }
     }
     func startProject(manual: Bool = true) {
         guard let store, !manual || !store.locked else { return }
@@ -123,10 +136,20 @@ final class PlaybackEngine: ObservableObject {
             let schedule = store.project.schedule(for: lane)
             if let p = store.project.playlist(schedule.initialPlaylistID), p.lane == lane { request(p, now: now) }
             else { store.message = "\(lane.title)の開始プレイリストを設定してください。" }
-        } catch { store.error = error.localizedDescription }
+        } catch {
+            if lane == .video { videoGate.stop(); videoState.stop(); videoMedia.stop(); output.close(); store.devices.restoreModes(); appliedDisplay = nil; appliedRate = nil }
+            else { audioGate.stop(); audioState.stop(); audioMedia.stop() }
+            store.error = error.localizedDescription
+        }
     }
     private func request(_ p: Playlist, now: TimeInterval) {
         guard let store, !p.tracks.isEmpty else { store?.message = "空のプレイリストは再生できません。"; return }
+        // A new request cancels even a transition whose replacement media is still being prepared.
+        if p.lane == .video, videoState.phase == .fadingIn || videoState.phase == .fadingOut {
+            videoState.stop(); videoMedia.stop()
+        } else if p.lane == .audio, audioState.phase == .fadingIn || audioState.phase == .fadingOut {
+            audioState.stop(); audioMedia.stop()
+        }
         let urls = p.tracks.map { $0.resolvedURL(relativeTo: store.directory) }
         for url in urls {
             if case .failed(let error) = store.library.states[url] { store.error = error; readyRequests[p.lane] = nil; return }
@@ -141,7 +164,7 @@ final class PlaybackEngine: ObservableObject {
     private func tick() {
         guard let store else { return }
         let now = ProcessInfo.processInfo.systemUptime, date = Date(), project = store.project
-        if date.timeIntervalSince(lastScheduleDate) >= 0.2 || date < lastScheduleDate {
+        if !shuttingDown && (date.timeIntervalSince(lastScheduleDate) >= 0.2 || date < lastScheduleDate) {
             if date.timeIntervalSince(lastScheduleDate) > 86_400 {
                 for lane in MediaLane.allCases {
                     if project.schedule(for: lane).contains(.at(date)) { startOutput(lane, now: now) }
@@ -189,6 +212,7 @@ final class PlaybackEngine: ObservableObject {
                                color: NSColor(hex: project.fadeColorHex), visible: videoState.active)
         if now - lastDeviceCheck > 2 {
             lastDeviceCheck = now; store.devices.refresh()
+            store.library.refreshIfChanged(project: project, directory: store.directory)
             if videoGate.active, let id = appliedDisplay, !store.devices.displays.contains(where: { $0.id == id }) {
                 videoGate.stop(); videoState.stop(); videoMedia.stop(); output.close(); store.error = "映像出力先が切断されました。"
             }
@@ -219,6 +243,8 @@ final class PlaybackEngine: ObservableObject {
             loadTrack(playlist, media: media, now: now)
         } else if !playlist.tracks.contains(where: { $0.id == media.trackID }) {
             media.index = min(media.index, playlist.tracks.count - 1); loadTrack(playlist, media: media, now: now)
+        } else if let index = playlist.tracks.firstIndex(where: { $0.id == media.trackID }) {
+            media.index = index
         }
         if media.player.currentItem?.status == .failed {
             store.error = media.player.currentItem?.error?.localizedDescription ?? "再生エラー"

@@ -26,6 +26,18 @@ final class PlayerStore: ObservableObject {
     var selectedTrack: MediaTrack? { selectedPlaylist?.tracks.first { $0.id == selectedTrackID } }
     enum Selection { case playlist, track }
     enum ClipboardItem { case playlist(Playlist), track(MediaTrack, MediaLane) }
+    var hasItemSelection: Bool { selection == .track ? selectedTrack != nil : selectedPlaylist != nil }
+    private let recentProjectKey = "GeoBoxPlayer.lastProjectPath"
+    private let remembersProject: Bool
+
+    init(restoreLastProject: Bool = true) {
+        remembersProject = restoreLastProject
+        if restoreLastProject, let path = UserDefaults.standard.string(forKey: recentProjectKey) {
+            let url = URL(fileURLWithPath: path)
+            do { project = try PlayerProject.decode(Data(contentsOf: url)); fileURL = url }
+            catch { message = "前回のプロジェクトを開けませんでした：\(error.localizedDescription)" }
+        }
+    }
 
     func change(_ edit: (inout PlayerProject) -> Void) {
         guard !locked else { return }
@@ -116,7 +128,7 @@ final class PlayerStore: ObservableObject {
         }
     }
     func deleteSelection() {
-        guard !locked else { return }
+        guard !locked, hasItemSelection else { return }
         if selection == .track, let p = selectedPlaylistID, let t = selectedTrackID {
             change { project in
                 if let i = project.playlists.firstIndex(where: { $0.id == p }) { project.playlists[i].tracks.removeAll { $0.id == t } }
@@ -130,7 +142,7 @@ final class PlayerStore: ObservableObject {
         var t = track; t.path = track.resolvedURL(relativeTo: directory).path; return t
     }
     func copySelection(cut: Bool = false) {
-        guard !locked else { return }
+        guard !locked, hasItemSelection else { return }
         if selection == .track, let t = selectedTrack, let p = selectedPlaylist {
             clipboard = .track(absolute(t), p.lane)
         } else if var p = selectedPlaylist {
@@ -164,23 +176,36 @@ final class PlayerStore: ObservableObject {
         }
         prepareMedia()
     }
-    func duplicate() { guard !locked else { return }; copySelection(); paste() }
+    func duplicate() {
+        guard !locked, hasItemSelection else { return }
+        let previousClipboard = clipboard
+        copySelection(); paste(); clipboard = previousClipboard
+    }
     func prepareMedia() { library.prepare(project: project, directory: directory) }
     func newProject() {
         guard !locked, confirmDiscard() else { return }
         engine.stopImmediately(); project = PlayerProject(); fileURL = nil; isDirty = false
         undoStack.removeAll(); redoStack.removeAll(); selectedPlaylistID = nil; selectedTrackID = nil
         showingProject = true; prepareMedia(); engine.resetSchedule()
+        if remembersProject { UserDefaults.standard.removeObject(forKey: recentProjectKey) }
     }
     func openProject() {
         guard !locked, confirmDiscard() else { return }
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.json]; panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        loadProject(at: url)
+    }
+    func openProject(at url: URL) {
+        guard !locked, confirmDiscard() else { return }
+        loadProject(at: url)
+    }
+    private func loadProject(at url: URL) {
         do {
             let next = try PlayerProject.decode(Data(contentsOf: url))
             engine.stopImmediately(); project = next; fileURL = url; isDirty = false
             undoStack.removeAll(); redoStack.removeAll(); selectedPlaylistID = nil; selectedTrackID = nil
             showingProject = true; prepareMedia(); engine.resetSchedule()
+            if remembersProject { UserDefaults.standard.set(url.path, forKey: recentProjectKey) }
         } catch { self.error = error.localizedDescription }
     }
     @discardableResult func save(as saveAs: Bool = false) -> Bool {
@@ -203,14 +228,21 @@ final class PlayerStore: ObservableObject {
             }
             try saved.encoded().write(to: destination, options: .atomic)
             project = saved; fileURL = destination; isDirty = false; message = "保存しました：\(destination.lastPathComponent)"
+            if remembersProject { UserDefaults.standard.set(destination.path, forKey: recentProjectKey) }
+            // Existing undo snapshots may contain paths relative to a different project directory.
+            undoStack.removeAll(); redoStack.removeAll()
             return true
         } catch { self.error = error.localizedDescription; return false }
     }
     func confirmDiscard() -> Bool {
         guard isDirty else { return true }
         let alert = NSAlert(); alert.messageText = "変更を保存しますか？"
-        alert.informativeText = "保存していない変更があります。"; alert.addButton(withTitle: "保存")
+        alert.informativeText = "保存していない変更があります。"; alert.addButton(withTitle: locked ? "ロック解除して保存" : "保存")
         alert.addButton(withTitle: "キャンセル"); alert.addButton(withTitle: "保存しない")
-        switch alert.runModal() { case .alertFirstButtonReturn: return save(); case .alertThirdButtonReturn: return true; default: return false }
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: locked = false; return save()
+        case .alertThirdButtonReturn: return true
+        default: return false
+        }
     }
 }

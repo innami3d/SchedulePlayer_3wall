@@ -37,14 +37,27 @@ struct GeoBoxPlayerApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    weak var store: PlayerStore?
+    weak var store: PlayerStore? {
+        didSet { if let pendingURL, let store { self.pendingURL = nil; store.openProject(at: pendingURL) } }
+    }
+    private var pendingURL: URL?
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true)
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func application(_ sender: NSApplication, openFiles filenames: [String]) {
+        guard let path = filenames.first else { sender.reply(toOpenOrPrint: .failure); return }
+        let url = URL(fileURLWithPath: path)
+        if let store { store.openProject(at: url) } else { pendingURL = url }
+        sender.reply(toOpenOrPrint: .success)
+    }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let store else { return .terminateNow }
         if !store.confirmDiscard() { return .terminateCancel }
+        if store.engine.outputIsActive {
+            Task { @MainActor in await store.engine.shutdown(); sender.reply(toApplicationShouldTerminate: true) }
+            return .terminateLater
+        }
         store.engine.stopImmediately(); return .terminateNow
     }
 }

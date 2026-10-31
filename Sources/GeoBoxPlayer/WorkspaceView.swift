@@ -237,11 +237,11 @@ struct TrackInspector: View {
 struct ItemEditMenu: View {
     @ObservedObject var store: PlayerStore
     var body: some View {
-        Button("Delete（削除）", role: .destructive) { store.deleteSelection() }.disabled(store.locked)
-        Button("複製") { store.duplicate() }.disabled(store.locked)
+        Button("Delete（削除）", role: .destructive) { store.deleteSelection() }.disabled(store.locked || !store.hasItemSelection)
+        Button("複製") { store.duplicate() }.disabled(store.locked || !store.hasItemSelection)
         Divider()
-        Button("コピー") { store.copySelection() }.disabled(store.locked)
+        Button("コピー") { store.copySelection() }.disabled(store.locked || !store.hasItemSelection)
         Button("ペースト") { store.paste() }.disabled(!store.canPaste)
-        Button("Cut（切り取り）") { store.copySelection(cut: true) }.disabled(store.locked)
+        Button("Cut（切り取り）") { store.copySelection(cut: true) }.disabled(store.locked || !store.hasItemSelection)
     }
 }
