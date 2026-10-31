@@ -39,6 +39,30 @@ final class PlayerStore: ObservableObject {
         }
     }
 
+    var selectedDisplay: OutputDevices.Display? {
+        OutputDevices.matchingDisplay(id: project.displayID, uuid: project.displayUUID, in: devices.displays)
+    }
+    func selectDisplay(_ id: UInt32?) {
+        let display = devices.displays.first { $0.id == id }
+        change {
+            $0.displayID = id; $0.displayUUID = display?.uuid; $0.displayName = display?.name
+        }
+    }
+    func selectAudioDevice(_ uid: String?) {
+        let device = devices.audio.first { $0.id == uid }
+        change { $0.audioDeviceUID = uid; $0.audioDeviceName = device?.name }
+    }
+    func rememberDeviceIdentities() {
+        // Upgrade older projects when their previously selected device is available.
+        if project.displayUUID == nil, let display = selectedDisplay, let uuid = display.uuid {
+            project.displayUUID = uuid; project.displayName = display.name; isDirty = true
+        }
+        if project.audioDeviceName == nil,
+           let device = devices.audio.first(where: { $0.id == project.audioDeviceUID }) {
+            project.audioDeviceName = device.name; isDirty = true
+        }
+    }
+
     func change(_ edit: (inout PlayerProject) -> Void) {
         guard !locked else { return }
         let old = project; var next = old; edit(&next)
@@ -217,6 +241,7 @@ final class PlayerStore: ObservableObject {
         }
         guard let destination else { return false }
         do {
+            rememberDeviceIdentities()
             try project.validate()
             var saved = project
             let base = destination.deletingLastPathComponent().standardizedFileURL.path + "/"

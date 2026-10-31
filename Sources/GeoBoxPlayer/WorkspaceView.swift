@@ -20,17 +20,14 @@ struct WorkspaceView: View {
                 }.frame(minWidth: 650, maxWidth: .infinity, maxHeight: .infinity)
             }
             Divider()
+            outputPreview
+            Divider()
             HStack {
                 Label(engine.status, systemImage: "play.rectangle")
                 Spacer()
                 Text(library.summary)
                 if store.locked { Label("時刻再生のみ", systemImage: "lock.fill") }
             }.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 16).padding(.vertical, 10)
-            if !engine.suppressionReasons.isEmpty && engine.videoState.active {
-                Text(engine.suppressionReasons.joined(separator: " ／ "))
-                    .font(.caption).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 16).padding(.bottom, 8)
-            }
         }
         .toolbar {
             ToolbarItem(placement: .navigation) {
@@ -43,8 +40,6 @@ struct WorkspaceView: View {
                 Button { store.openProject() } label: { Label("開く", systemImage: "folder") }.disabled(store.locked)
                 Button { store.save() } label: { Label("保存", systemImage: "square.and.arrow.down") }.disabled(store.locked)
                 Divider()
-                Button("出力開始", systemImage: "play.fill") { engine.startProject() }.disabled(store.locked)
-                Button("出力終了", systemImage: "stop.fill") { engine.endProject() }.disabled(store.locked)
                 Button {
                     store.locked.toggle()
                 } label: { Label(store.locked ? "ロック解除" : "画面をロック", systemImage: store.locked ? "lock.fill" : "lock.open") }
@@ -56,6 +51,28 @@ struct WorkspaceView: View {
             Button("OK") { store.error = nil }
         } message: { Text(store.error ?? "") }
         .onAppear { engine.startClock(); store.prepareMedia() }
+    }
+    private var outputPreview: some View {
+        HStack(alignment: .center, spacing: 16) {
+            PreviewSurface(engine: engine)
+                .aspectRatio(16 / 9, contentMode: .fit)
+                .frame(width: 220, height: 123.75)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            VStack(alignment: .leading, spacing: 7) {
+                Text("送出プレビュー").font(.headline)
+                Text(store.project.playlist(engine.videoState.playlistID)?.name ?? "映像は停止中")
+                    .font(.callout).lineLimit(1)
+                Text("4K固定 · \(store.project.refreshRate.formatted()) Hz")
+                    .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                if engine.videoState.active && !engine.suppressionReasons.isEmpty {
+                    Text(engine.suppressionReasons.joined(separator: " ／ "))
+                        .font(.caption).foregroundStyle(.orange)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 24).padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
     private var sidebar: some View {
         ScrollView {
@@ -90,7 +107,11 @@ struct WorkspaceView: View {
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
             }.buttonStyle(.plain)
-            Button { engine.play(playlist.id) } label: { Image(systemName: "play.fill").padding(4) }
+            Button { engine.play(playlist.id) } label: {
+                Image(systemName: "play.fill")
+                    .foregroundStyle(playback(playlist.lane).playlistID == playlist.id ? Color.green : Color.accentColor)
+                    .padding(4)
+            }
                 .buttonStyle(.borderless).help("このプレイリストを再生").disabled(store.locked)
         }
         .padding(10)
@@ -130,16 +151,6 @@ struct PlaylistEditor: View {
                         Toggle("プレイリスト全体をミュート", isOn: store.playlistBinding(\.muted, fallback: false)).toggleStyle(.switch)
                     }
                 }.disabled(store.locked)
-                if playlist.lane == .video {
-                    HStack(alignment: .top, spacing: 16) {
-                        PreviewSurface(engine: engine).aspectRatio(16 / 9, contentMode: .fit).frame(width: 220).clipShape(RoundedRectangle(cornerRadius: 6))
-                        VStack(alignment: .leading, spacing: 7) {
-                            Text("送出プレビュー").font(.caption).foregroundStyle(.secondary)
-                            Text(audioExplanation(playlist)).font(.callout).foregroundStyle(.secondary)
-                            Text("4K固定 · \(store.project.refreshRate.formatted()) Hz").font(.caption).monospacedDigit()
-                        }
-                    }
-                }
                 HStack {
                     Text("トラック").font(.headline)
                     Spacer()
@@ -173,12 +184,6 @@ struct PlaylistEditor: View {
                 Text(store.message).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
             }
         }.padding(24)
-    }
-    private func audioExplanation(_ playlist: Playlist) -> String {
-        var reasons: [String] = []
-        if engine.audioState.active { reasons.append("音声プレイリスト再生中のため動画内音声を抑制") }
-        if playlist.muted { reasons.append("プレイリストをミュート中") }
-        return reasons.isEmpty ? "音声プレイリストが停止中の場合、動画内音声を出力します。" : reasons.joined(separator: "\n")
     }
     private func trackRow(_ track: MediaTrack, index: Int) -> some View {
         Button { store.selectTrack(track.id) } label: {

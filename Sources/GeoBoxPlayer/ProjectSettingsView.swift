@@ -24,8 +24,11 @@ struct ProjectSettingsView: View {
                     Text(store.fileURL?.path ?? "未保存のプロジェクト").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                 }
                 Section("映像出力 · 4K固定 / 1系統") {
-                    Picker("映像出力先", selection: binding(\.displayID)) {
+                    Picker("映像出力先", selection: Binding(get: { store.selectedDisplay?.id ?? store.project.displayID.map { _ in UInt32.max } }, set: store.selectDisplay)) {
                         Text("出力先を選択").tag(nil as UInt32?)
+                        if store.selectedDisplay == nil, store.project.displayID != nil {
+                            Text("\(store.project.displayName ?? "前回のディスプレイ")（未接続・自動再接続待ち）").tag(Optional(UInt32.max))
+                        }
                         ForEach(devices.displays) { display in Text(display.name).tag(Optional(display.id)) }
                     }
                     if rates.isEmpty {
@@ -44,17 +47,16 @@ struct ProjectSettingsView: View {
                     OutputScheduleFields(store: store, lane: .video)
                 }
                 Section("音声出力") {
-                    Picker("音声出力先", selection: binding(\.audioDeviceUID)) {
+                    Picker("音声出力先", selection: Binding(get: { store.project.audioDeviceUID }, set: store.selectAudioDevice)) {
                         Text("システムのデフォルト").tag(nil as String?)
+                        if let uid = store.project.audioDeviceUID, !devices.audio.contains(where: { $0.id == uid }) {
+                            Text("\(store.project.audioDeviceName ?? "前回の音声機器")（未接続・自動再接続待ち）").tag(Optional(uid))
+                        }
                         ForEach(devices.audio) { device in Text(device.name).tag(Optional(device.id)) }
                     }
                     OutputScheduleFields(store: store, lane: .audio)
                 }
-                Section("共通設定・新規作成時の初期値") {
-                    HStack {
-                        NumberField(title: "新規プレイリスト IN（秒）", value: binding(\.defaults.playlistFades.fadeIn), range: 0...safeFadeMax)
-                        NumberField(title: "新規プレイリスト OUT（秒）", value: binding(\.defaults.playlistFades.fadeOut), range: 0...safeFadeMax)
-                    }
+                Section("共通再生設定") {
                     HStack {
                         NumberField(title: "映像トラック間 IN（秒）", value: binding(\.defaults.videoTrackFades.fadeIn), range: 0...safeFadeMax)
                         NumberField(title: "映像トラック間 OUT（秒）", value: binding(\.defaults.videoTrackFades.fadeOut), range: 0...safeFadeMax)
@@ -63,26 +65,11 @@ struct ProjectSettingsView: View {
                         NumberField(title: "音声トラック間 IN（秒）", value: binding(\.defaults.audioTrackFades.fadeIn), range: 0...safeFadeMax)
                         NumberField(title: "音声トラック間 OUT（秒）", value: binding(\.defaults.audioTrackFades.fadeOut), range: 0...safeFadeMax)
                     }
-                    HStack {
-                        NumberField(title: "画像表示時間（秒）", value: binding(\.defaults.imageDuration), range: 0.1...max(0.1, store.project.defaults.imageMax))
-                        NumberField(title: "新規トラック音量（%）", value: percentBinding(\.defaults.volume), range: 0...100)
-                    }
-                    Toggle("新規映像プレイリストをミュート", isOn: binding(\.defaults.muteVideo))
                     ColorPicker("映像フェード先", selection: Binding(get: { Color(nsColor: NSColor(hex: store.project.fadeColorHex)) }, set: { color in
                         guard let c = NSColor(color).usingColorSpace(.sRGB) else { return }
                         store.change { $0.fadeColorHex = String(format: "#%02X%02X%02X", Int(c.redComponent * 255), Int(c.greenComponent * 255), Int(c.blueComponent * 255)) }
                     }), supportsOpacity: false)
-                    DisclosureGroup("設定範囲") {
-                        HStack {
-                            NumberField(title: "フェード上限（秒）", value: binding(\.defaults.fadeMax), range: 0...86400)
-                            NumberField(title: "画像表示時間上限（秒）", value: binding(\.defaults.imageMax), range: 0.1...604800)
-                        }
-                        HStack {
-                            NumberField(title: "音量の下限（%）", value: percentBinding(\.defaults.volumeMin), range: 0...min(100, store.project.defaults.volumeMax * 100))
-                            NumberField(title: "音量の上限（%）", value: percentBinding(\.defaults.volumeMax), range: max(0, store.project.defaults.volumeMin * 100)...100)
-                        }
-                    }
-                    Text("初期値は新規作成分に適用します。トラック間フェードは全対象に適用し、0秒でフェードなしになります。")
+                    Text("トラック間フェードは全対象に適用し、0秒でフェードなしになります。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }.formStyle(.grouped).disabled(store.locked)
@@ -91,10 +78,7 @@ struct ProjectSettingsView: View {
         }.padding(24)
     }
     private var safeFadeMax: Double { max(0, store.project.defaults.fadeMax) }
-    private var rates: [Double] { devices.displays.first { $0.id == store.project.displayID }?.rates ?? [] }
-    private func percentBinding(_ path: WritableKeyPath<PlayerProject, Double>) -> Binding<Double> {
-        Binding(get: { store.project[keyPath: path] * 100 }, set: { value in store.change { $0[keyPath: path] = value / 100 } })
-    }
+    private var rates: [Double] { store.selectedDisplay?.rates ?? [] }
 }
 
 struct OutputScheduleFields: View {
@@ -107,7 +91,7 @@ struct OutputScheduleFields: View {
         })
     }
     var body: some View {
-        Picker("開始プレイリスト", selection: binding(\.initialPlaylistID)) {
+        Picker("デフォルト再生プレイリスト", selection: binding(\.initialPlaylistID)) {
             Text("指定なし").tag(nil as UUID?)
             ForEach(store.project.playlists.filter { $0.lane == lane }) { p in Text(p.name).tag(Optional(p.id)) }
             if let id = schedule.initialPlaylistID, store.project.playlist(id) == nil { Text("指定先は削除済み").tag(Optional(id)) }
