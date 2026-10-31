@@ -8,7 +8,8 @@ let package = Package(
     targets: [
         .target(name: "PlayerCore"),
         .executableTarget(name: "GeoBoxPlayer", dependencies: ["PlayerCore"]),
-        .testTarget(name: "PlayerCoreTests", dependencies: ["PlayerCore"])
+        .testTarget(name: "PlayerCoreTests", dependencies: ["PlayerCore"]),
+        .testTarget(name: "PlayerAppTests", dependencies: ["GeoBoxPlayer", "PlayerCore"])
     ],
     swiftLanguageModes: [.v5]
 )
