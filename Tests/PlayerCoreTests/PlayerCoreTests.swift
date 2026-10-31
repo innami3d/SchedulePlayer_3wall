@@ -92,6 +92,7 @@ final class PlayerCoreTests: XCTestCase {
     }
     func testLatestScheduleAndMidnightCrossing() {
         var (project, a, b) = fixture()
+        project.calendarEntries = nil // Exercise legacy scheduling used during migration.
         a.start = .init(hour: 0); a.scheduleOrder = 1
         b.start = a.start; b.scheduleOrder = 2; project.playlists = [a, b]
         var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -100,8 +101,10 @@ final class PlayerCoreTests: XCTestCase {
         XCTAssertEqual(events.filter { $0.lane == .video }.map(\.action), [.playlist(b.id)])
         XCTAssertTrue(DailyScheduler.events(project: project, after: midnight, through: midnight, calendar: calendar).isEmpty)
     }
+
     func testProjectStartWinsPlaylistAndSuppressionReasons() {
         var (project, a, _) = fixture(); a.start = project.video.start; project.playlists = [a]
+        project.calendarEntries = nil // Exercise legacy scheduling used during migration.
         var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         let day = Date(timeIntervalSince1970: 1_735_776_000), start = project.video.start.date(on: day, calendar: calendar)!
         let events = DailyScheduler.events(project: project, after: start.addingTimeInterval(-1), through: start, calendar: calendar)
@@ -112,6 +115,7 @@ final class PlayerCoreTests: XCTestCase {
 }
 
 extension PlayerCoreTests {
+
     func testRememberedOutputDevicesRoundTripAndLegacyProject() throws {
         var project = PlayerProject()
         project.displayID = 10; project.displayUUID = "display-uuid"; project.displayName = "GeoBox"
@@ -136,6 +140,7 @@ extension PlayerCoreTests {
     }
     func testResumeInitialPlaylistAndTrackLoopPosition() throws {
         var (project, a, b) = fixture()
+        project.calendarEntries = nil // Exercise legacy scheduling used during migration.
         a.start = .init(hour: 16); b.start = .init(hour: 20)
         project.playlists = [a, b]; project.video.initialPlaylistID = a.id
         let playback = try XCTUnwrap(DailyScheduler.playback(project: project, lane: .video, at: date(17, 1, 15), now: 100, calendar: scheduleCalendar))
@@ -147,8 +152,10 @@ extension PlayerCoreTests {
         XCTAssertEqual(ScheduledTrackPosition.resolve(durations: [20, 30], elapsed: 20)?.index, 1)
         XCTAssertNil(ScheduledTrackPosition.resolve(durations: [0], elapsed: 2))
     }
+
     func testResumePlaylistSwitchIncludesOutgoingFadeAndPriority() throws {
         var (project, a, b) = fixture()
+        project.calendarEntries = nil // Exercise legacy scheduling used during migration.
         a.start = .init(hour: 17); a.fades.fadeOut = 4
         b.start = .init(hour: 18); b.scheduleOrder = 2
         var losing = b.duplicated(order: 1); losing.start = b.start
@@ -164,8 +171,10 @@ extension PlayerCoreTests {
         let start = try XCTUnwrap(DailyScheduler.playback(project: project, lane: .video, at: date(17), now: 100, calendar: scheduleCalendar))
         XCTAssertEqual(start.state.playlistID, b.id)
     }
+
     func testResumeOvernightAndOutputWindowBoundaries() throws {
         var (project, a, b) = fixture()
+        project.calendarEntries = nil // Exercise legacy scheduling used during migration.
         project.video.start = .init(hour: 22); project.video.end = .init(hour: 6)
         a.start = .init(hour: 22); b.start = .init(hour: 1)
         project.video.initialPlaylistID = a.id; project.playlists = [a, b]
@@ -178,8 +187,10 @@ extension PlayerCoreTests {
         project.video.end = project.video.start
         XCTAssertNil(DailyScheduler.playback(project: project, lane: .video, at: date(22), now: 100, calendar: scheduleCalendar))
     }
+
     func testResumeIndependentAudioAndIgnoredEmptyPlaylist() throws {
         var (project, a, _) = fixture()
+        project.calendarEntries = nil // Exercise legacy scheduling used during migration.
         a.start = .init(hour: 17)
         var empty = Playlist(name: "Empty", lane: .video); empty.start = .init(hour: 18)
         var audio = Playlist(name: "Audio", lane: .audio); audio.start = .init(hour: 19)
@@ -194,8 +205,10 @@ extension PlayerCoreTests {
 }
 
 extension PlayerCoreTests {
+
     func testResumePlaylistBeforeDefaultStartUntilNextEventAndDailyStop() throws {
         var (project, initial, early) = fixture()
+        project.calendarEntries = nil // Exercise legacy scheduling used during migration.
         initial.start = .init(hour: 17); initial.fades = .init(fadeIn: 0, fadeOut: 0)
         early.name = "aa"; early.start = .init(hour: 13, minute: 58)
         early.fades = .init(fadeIn: 0, fadeOut: 0)

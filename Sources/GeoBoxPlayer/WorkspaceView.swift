@@ -12,13 +12,15 @@ struct WorkspaceView: View {
             HSplitView {
                 sidebar.frame(minWidth: 220, idealWidth: 240, maxWidth: 300)
                 ScrollView {
-                    if store.showingProject || store.selectedPlaylist == nil {
+                    if store.showingScheduler {
+                        SchedulerSettingsView(store: store)
+                    } else if store.showingProject || store.selectedPlaylist == nil {
                         ProjectSettingsView(store: store, devices: store.devices)
                     } else {
                         PlaylistEditor(store: store, engine: engine, library: library)
                     }
                 }
-                .id(store.showingProject ? "project" : store.selectedPlaylistID?.uuidString ?? "project")
+                .id(store.showingScheduler ? "scheduler" : store.showingProject ? "project" : store.selectedPlaylistID?.uuidString ?? "project")
                 .frame(minWidth: 650, maxWidth: .infinity, maxHeight: .infinity)
             }
             Divider()
@@ -39,13 +41,14 @@ struct WorkspaceView: View {
                 }
             }
             ToolbarItemGroup {
-                Button { store.openProject() } label: { Label("開く", systemImage: "folder") }.disabled(store.locked)
-                Button { store.save() } label: { Label("保存", systemImage: "square.and.arrow.down") }.disabled(store.locked)
+                Button { store.openProject() } label: { Label("開く", systemImage: "folder") }.controlHover().disabled(store.locked)
+                Button { store.save() } label: { Label("保存", systemImage: "square.and.arrow.down") }.controlHover().disabled(store.locked)
                 Divider()
                 Button {
                     store.locked.toggle()
                 } label: { Label(store.locked ? "ロック解除" : "画面をロック", systemImage: store.locked ? "lock.fill" : "lock.open") }
                     .tint(store.locked ? .orange : nil)
+                    .controlHover(tint: store.locked ? .orange : .accentColor)
             }
         }
         .background(KeyEventBridge(store: store))
@@ -53,6 +56,7 @@ struct WorkspaceView: View {
             Button("OK") { store.error = nil }
         } message: { Text(store.error ?? "") }
         .onAppear { engine.startClock(); store.prepareMedia() }
+        .onChange(of: store.project.calendarEntries) { _, _ in engine.resetSchedule(reconcile: true) }
     }
     private var outputPreview: some View {
         HStack(alignment: .center, spacing: 16) {
@@ -86,7 +90,12 @@ struct WorkspaceView: View {
                         .background(store.showingProject ? Color.accentColor.opacity(0.14) : Color.clear, in: RoundedRectangle(cornerRadius: 7))
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain).padding(.bottom, 4)
+                .buttonStyle(.plain).rowHover().padding(.bottom, 4)
+                Button { store.selectScheduler() } label: {
+                    Label("スケジューラ設定", systemImage: "calendar")
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                        .background(store.showingScheduler ? Color.accentColor.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 7))
+                }.buttonStyle(.plain).rowHover()
                 ForEach(MediaLane.allCases) { lane in
                     VStack(alignment: .leading, spacing: 6) {
                         Text("\(lane.title)プレイリスト").font(.caption).foregroundStyle(.secondary).padding(.horizontal, 8)
@@ -94,7 +103,7 @@ struct WorkspaceView: View {
                             playlistRow(playlist)
                         }
                         Button { store.createPlaylist(lane) } label: { Label("プレイリスト作成", systemImage: "plus").frame(maxWidth: .infinity, alignment: .leading) }
-                            .buttonStyle(.borderless).padding(8).disabled(store.locked)
+                            .buttonStyle(.borderless).padding(8).controlHover().disabled(store.locked)
                     }
                 }
                 Text(store.locked ? "ロック中は時刻設定に従って\n再生します。" : "右クリックで編集\n映像・音声それぞれ同時再生は1つ")
@@ -103,29 +112,30 @@ struct WorkspaceView: View {
         }.background(.quaternary.opacity(0.35))
     }
     private func playlistRow(_ playlist: Playlist) -> some View {
-        HStack {
-            Button { store.selectPlaylist(playlist.id) } label: {
+        Button { store.selectPlaylist(playlist.id) } label: {
+            HStack {
+                Image(systemName: "line.3.horizontal")
+                    .foregroundStyle(.secondary)
+                    .help("カレンダーへドラッグして再生予定を追加")
                 VStack(alignment: .leading, spacing: 3) {
                     Text(playlist.name).fontWeight(.medium).lineLimit(1)
-                    Text(playlist.start.text).font(.caption).monospacedDigit().foregroundStyle(.secondary)
                     if playback(playlist.lane).playlistID == playlist.id {
                         Text(playback(playlist.lane).phase.title).font(.caption).foregroundStyle(.tint)
                     } else if playback(playlist.lane).pendingID == playlist.id {
                         Text("次の再生待ち").font(.caption).foregroundStyle(.secondary)
                     }
-                }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-            }.buttonStyle(.plain)
-            Button { engine.play(playlist.id) } label: {
-                Image(systemName: "play.fill")
-                    .foregroundStyle(playback(playlist.lane).playlistID == playlist.id ? Color.green : Color.accentColor)
-                    .padding(4)
+                }.frame(maxWidth: .infinity, alignment: .leading)
             }
-                .buttonStyle(.borderless).help("このプレイリストを再生").disabled(store.locked)
+            .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+            .padding(10)
+            .contentShape(Rectangle())
         }
-        .padding(10)
+        .buttonStyle(.plain)
         .background(store.selectedPlaylistID == playlist.id && !store.showingProject ? Color.accentColor.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 7))
-        .background(ContextSelectionObserver { store.selectPlaylist(playlist.id) })
+        .rowHover()
+        .background(ContextSelectionObserver { store.selectPlaylist(playlist.id) }.allowsHitTesting(false))
         .contextMenu { ItemEditMenu(store: store) }
+        .draggable(store.locked ? "" : "playlist:" + playlist.id.uuidString)
     }
     private func playback(_ lane: MediaLane) -> LanePlayback { lane == .video ? engine.videoState : engine.audioState }
 }
@@ -146,18 +156,13 @@ struct PlaylistEditor: View {
                         Text(playlist.name).font(.title2).fontWeight(.semibold)
                     }
                     Spacer()
-                    Button("このプレイリストを再生", systemImage: "play.fill") { engine.play(playlist.id) }
-                        .disabled(store.locked || playlist.tracks.isEmpty)
                 }
                 VStack(alignment: .leading, spacing: 14) {
-                    LabeledContent("プレイリスト名") { TextField("名前", text: store.playlistBinding(\.name, fallback: "")).frame(maxWidth: 380) }
-                    HStack(spacing: 20) {
-                        TimeField(title: "開始時刻", value: Binding(get: { playlist.start }, set: store.setPlaylistTime))
-                        NumberField(title: "フェードイン（秒）", value: store.playlistBinding(\.fades.fadeIn, fallback: 2), range: 0...store.project.defaults.fadeMax)
-                        NumberField(title: "フェードアウト（秒）", value: store.playlistBinding(\.fades.fadeOut, fallback: 2), range: 0...store.project.defaults.fadeMax)
-                    }
+                    LabeledContent("プレイリスト名") { TextField("名前", text: store.playlistBinding(\.name, fallback: "")).frame(maxWidth: 380).fieldHover() }
+                    Text("プレイリストの開始・終了フェードは、スケジューラの再生予定で設定します。")
+                        .font(.caption).foregroundStyle(.secondary)
                     if playlist.lane == .video {
-                        Toggle("プレイリスト全体をミュート", isOn: store.playlistBinding(\.muted, fallback: false)).toggleStyle(.switch)
+                        Toggle("プレイリスト全体をミュート", isOn: store.playlistBinding(\.muted, fallback: false)).toggleStyle(.switch).controlHover()
                     }
                     GroupBox("トラック間の再生設定") {
                         VStack(alignment: .leading, spacing: 14) {
@@ -172,7 +177,7 @@ struct PlaylistEditor: View {
                             ColorPicker("映像フェード先", selection: Binding(get: { Color(nsColor: NSColor(hex: playlist.playbackSettings.fadeColorHex)) }, set: { color in
                                 guard let c = NSColor(color).usingColorSpace(.sRGB) else { return }
                                 store.playlistBinding(\.playbackSettings.fadeColorHex, fallback: "#000000").wrappedValue = String(format: "#%02X%02X%02X", Int(c.redComponent * 255), Int(c.greenComponent * 255), Int(c.blueComponent * 255))
-                            }), supportsOpacity: false)
+                            }), supportsOpacity: false).controlHover()
                             Text("このプレイリスト内のトラックに適用します。0秒でフェードなしになります。")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
@@ -201,6 +206,7 @@ struct PlaylistEditor: View {
                     Text(store.locked ? "ロック中：ファイル追加・並べ替えは無効" : "ファイルをドロップして追加 · トラックをドラッグして並べ替え")
                         .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.vertical, 25)
                         .background(dropAtEnd ? Color.accentColor.opacity(0.12) : .clear)
+                        .rowHover(enabled: !store.locked)
                         .onDrop(of: [.fileURL, .utf8PlainText], isTargeted: $dropAtEnd) { providers in
                             guard !store.locked else { return false }; receiveDrop(providers, store: store, before: nil); return true
                         }
@@ -232,7 +238,7 @@ struct PlaylistEditor: View {
             } label: {
                 Image(systemName: "play.fill").frame(width: 28, height: 28)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.borderless).controlHover()
             .help("このトラックに割り込んで再生")
             .accessibilityLabel("\(track.filename)を再生")
             .disabled(store.locked)
@@ -245,6 +251,7 @@ struct PlaylistEditor: View {
                 else if hoveredTrackID == track.id { hoveredTrackID = nil }
             }
             .background(store.selectedTrackID == track.id ? Color.accentColor.opacity(0.12) : .clear)
+            .rowHover(radius: 4)
             .background(ContextSelectionObserver { store.selectTrack(track.id) })
             .contextMenu { ItemEditMenu(store: store) }
             .onDrag { store.locked ? NSItemProvider() : NSItemProvider(object: track.id.uuidString as NSString) }
@@ -266,13 +273,13 @@ struct TrackInspector: View {
             Divider()
             Text("トラック設定").font(.headline)
             LabeledContent("ファイルパス") {
-                TextField("パス", text: store.trackBinding(\.path, fallback: "")).textFieldStyle(.roundedBorder)
+                TextField("パス", text: store.trackBinding(\.path, fallback: "")).textFieldStyle(.roundedBorder).fieldHover()
             }
             HStack(spacing: 24) {
                 VStack(alignment: .leading) {
                     Text(track.kind == .image ? "音声ボリューム · 対象外" : "音声ボリューム · \(Int(track.volume * 100))%")
                         .font(.caption).foregroundStyle(.secondary)
-                    Slider(value: store.trackBinding(\.volume, fallback: 1), in: volumeRange)
+                    Slider(value: store.trackBinding(\.volume, fallback: 1), in: volumeRange).controlHover()
                         .disabled(track.kind == .image)
                 }
                 if track.kind == .image {

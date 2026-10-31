@@ -34,23 +34,25 @@ public struct LanePlayback {
     public private(set) var pendingID: UUID?
     public private(set) var phase: PlaybackPhase = .stopped
     public private(set) var envelope = Envelope()
+    private var usesPlaylistFades = true
     public init() {}
     public var active: Bool { playlistID != nil }
 
-    public mutating func request(_ next: Playlist, project: PlayerProject, now: TimeInterval) {
+    public mutating func request(_ next: Playlist, project: PlayerProject, now: TimeInterval, usePlaylistFades: Bool = true) {
         guard !next.tracks.isEmpty else { return }
+        usesPlaylistFades = usePlaylistFades
         if phase == .fadingIn || phase == .fadingOut {
             stop(); begin(next, now: now)
         } else if let current = project.playlist(playlistID) {
             guard current.id != next.id else { return }
             pendingID = next.id; phase = .fadingOut
-            envelope = Envelope(from: envelope.value(at: now), to: 0, started: now, duration: current.fades.fadeOut)
+            envelope = Envelope(from: envelope.value(at: now), to: 0, started: now, duration: usesPlaylistFades ? current.fades.fadeOut : 0)
         } else { begin(next, now: now) }
         tick(project: project, now: now)
     }
     private mutating func begin(_ next: Playlist, now: TimeInterval) {
         playlistID = next.id; pendingID = nil; phase = .fadingIn
-        envelope = Envelope(from: 0, to: 1, started: now, duration: next.fades.fadeIn)
+        envelope = Envelope(from: 0, to: 1, started: now, duration: usesPlaylistFades ? next.fades.fadeIn : 0)
     }
     public mutating func tick(project: PlayerProject, now: TimeInterval) {
         guard let current = project.playlist(playlistID), !current.tracks.isEmpty else { stop(); return }

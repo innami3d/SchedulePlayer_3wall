@@ -155,6 +155,7 @@ public struct PlayerProject: Codable, Equatable {
     public var audio = OutputSchedule()
     public var defaults = ProjectDefaults()
     public var playlists: [Playlist] = []
+    public var calendarEntries: [CalendarEntry]? = []
     public init() {}
     public func schedule(for lane: MediaLane) -> OutputSchedule { lane == .video ? video : audio }
     public func playlist(_ id: UUID?) -> Playlist? { playlists.first { $0.id == id } }
@@ -169,12 +170,42 @@ public struct PlayerProject: Codable, Equatable {
         for index in project.playlists.indices {
             project.playlists[index].inheritPlaybackSettings(defaults: project.defaults, fadeColorHex: project.fadeColorHex)
         }
+        if project.calendarEntries == nil { project.migrateDailySchedule() }
         try project.validate()
         // Upgrade the former default so existing projects also support long images.
         if project.defaults.imageMax == 3600 {
             project.defaults.imageMax = ProjectDefaults.maximumImageDuration
         }
         return project
+    }
+    private mutating func migrateDailySchedule() {
+        let calendar = Calendar.current
+        let day = calendar.startOfDay(for: Date())
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: day)!
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: day)!
+        var entries: [CalendarEntry] = []
+        for lane in MediaLane.allCases {
+            let decisions = DailyScheduler.events(project: self, after: yesterday.addingTimeInterval(-1), through: day.addingTimeInterval(-1))
+                + DailyScheduler.events(project: self, after: day.addingTimeInterval(-1), through: tomorrow.addingTimeInterval(-1))
+            var current: (UUID, Date)?
+            for event in decisions where event.lane == lane {
+                if let (id, start) = current, start >= yesterday, start < day, event.date > start {
+                    entries.append(CalendarEntry(playlistID: id, start: start, end: event.date,
+                                                 fades: schedule(for: lane).fades, repetition: .daily))
+                }
+                switch event.action {
+                case .endOutput: current = nil
+                case .startOutput: current = schedule(for: lane).initialPlaylistID.map { ($0, event.date) }
+                case .playlist(let id): current = (id, event.date)
+                }
+            }
+            if let (id, start) = current, start >= yesterday, start < day {
+                let next = DailyScheduler.events(project: self, after: tomorrow.addingTimeInterval(-1), through: tomorrow.addingTimeInterval(86_399))
+                    .first { $0.lane == lane }
+                if let next { entries.append(CalendarEntry(playlistID: id, start: start, end: next.date, fades: schedule(for: lane).fades, repetition: .daily)) }
+            }
+        }
+        calendarEntries = entries.filter { playlist($0.playlistID) != nil }
     }
     public func validate() throws {
         func finite(_ value: Double, _ range: ClosedRange<Double>) -> Bool { value.isFinite && range.contains(value) }
@@ -190,6 +221,21 @@ public struct PlayerProject: Codable, Equatable {
         }
         for s in [video, audio] {
             guard (0...86_399).contains(s.start.seconds), (0...86_399).contains(s.end.seconds) else { throw ProjectError.invalidValues }
+        }
+        let entries = calendarEntries ?? []
+        guard Set(entries.map(\.id)).count == entries.count else { throw ProjectError.invalidValues }
+        for entry in entries {
+            guard playlist(entry.playlistID) != nil, entry.start.timeIntervalSince1970.isFinite,
+                  entry.end.timeIntervalSince1970.isFinite, entry.end > entry.start,
+                  entry.end.timeIntervalSince(entry.start) <= 7 * 86_400,
+                  [entry.repeatUntil, entry.originalStart].compactMap({ $0 }).allSatisfy({ $0.timeIntervalSince1970.isFinite }),
+                  (entry.excludedStarts ?? []).allSatisfy({ $0.timeIntervalSince1970.isFinite }),
+                  finite(entry.fades.fadeIn, 0...defaults.fadeMax),
+                  finite(entry.fades.fadeOut, 0...defaults.fadeMax) else { throw ProjectError.invalidValues }
+            if let parentID = entry.parentSeriesID {
+                guard entry.repetition == .once, entry.originalStart != nil,
+                      entries.contains(where: { $0.id == parentID && $0.parentSeriesID == nil && $0.repetition != .once }) else { throw ProjectError.invalidValues }
+            }
         }
         for p in playlists {
             guard (0...86_399).contains(p.start.seconds), Set(p.tracks.map(\.id)).count == p.tracks.count else { throw ProjectError.invalidValues }
