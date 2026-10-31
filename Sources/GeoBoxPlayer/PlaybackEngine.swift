@@ -11,6 +11,9 @@ final class LaneMedia {
     var image: NSImage?
     var duration: Double = 0
     var started: TimeInterval?
+    var resumeOffset: Double = 0
+    var resumeDate: Date?
+    var seeking = false
     var ready = false
     var ended = false
     var fadingOut = false
@@ -21,7 +24,7 @@ final class LaneMedia {
         player.pause(); player.replaceCurrentItem(with: nil)
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }; endObserver = nil
         image = nil; playlistID = nil; trackID = nil; started = nil; ready = false; ended = false; fadingOut = false
-        duration = 0; envelope = Envelope()
+        duration = 0; resumeOffset = 0; resumeDate = nil; seeking = false; envelope = Envelope()
     }
 }
 
@@ -35,6 +38,8 @@ final class PlaybackEngine: ObservableObject {
     let videoMedia = LaneMedia()
     let audioMedia = LaneMedia()
     private let output = VideoOutput()
+    private var recoveryLanes: Set<MediaLane> = []
+    private var lastRecoveryAttempt: TimeInterval = -.infinity
     private var readyRequests: [MediaLane: UUID] = [:]
     private var timer: Timer?
     private var lastScheduleDate = Date()
@@ -48,7 +53,9 @@ final class PlaybackEngine: ObservableObject {
     private(set) var audioDisconnected = false
     var videoOpacity: Double = 0
     var status: String {
-        "映像：\(videoDisconnected ? "機器の再接続待ち" : videoState.phase.title) ／ 音声：\(audioDisconnected ? "機器の再接続待ち" : audioState.phase.title)"
+        let previewOnly = videoGate.active && store?.project.displayID == nil && store?.project.displayUUID == nil
+        let videoStatus = previewOnly ? "プレビューのみ（\(videoState.phase.title)）" : (videoDisconnected ? "機器の再接続待ち" : videoState.phase.title)
+        return "映像：\(videoStatus) ／ 音声：\(audioDisconnected ? "機器の再接続待ち" : audioState.phase.title)"
     }
     var suppressionReasons: [String] {
         guard let store else { return [] }
@@ -61,12 +68,17 @@ final class PlaybackEngine: ObservableObject {
         guard timer == nil else { return }
         lastScheduleDate = Date()
         store?.rememberDeviceIdentities()
+        if store?.fileURL != nil { recoveryLanes = Set(MediaLane.allCases) }
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
         if let timer { RunLoop.main.add(timer, forMode: .common) }
     }
-    func resetSchedule() { lastScheduleDate = Date(); shuttingDown = false }
+    func resetSchedule(reconcile: Bool = false) {
+        lastScheduleDate = Date(); shuttingDown = false
+        recoveryLanes = reconcile ? Set(MediaLane.allCases) : []
+        lastRecoveryAttempt = -.infinity
+    }
     var outputIsActive: Bool { videoGate.active || audioGate.active }
     func shutdown() async {
         shuttingDown = true; endProject(manual: false)
@@ -78,31 +90,31 @@ final class PlaybackEngine: ObservableObject {
     }
     func play(_ id: UUID) {
         guard let store, !store.locked, let playlist = store.project.playlist(id) else { return }
+        recoveryLanes.remove(playlist.lane)
         let now = ProcessInfo.processInfo.systemUptime
-        do {
-            if playlist.lane == .video {
-                if !videoGate.active { try openVideo(); videoGate.start(duration: store.project.video.fades.fadeIn, now: now) }
-                if !audioGate.active { try openAudio(); audioGate.start(duration: store.project.audio.fades.fadeIn, now: now) }
-            } else if !audioGate.active { try openAudio(); audioGate.start(duration: store.project.audio.fades.fadeIn, now: now) }
-            request(playlist, now: now)
-        } catch {
-            if !videoState.active { videoGate.stop(); output.close(); store.devices.restoreModes(); appliedDisplay = nil; appliedRate = nil }
-            store.error = error.localizedDescription
-        }
+        if playlist.lane == .video {
+            if !videoGate.active { beginOutput(.video, now: now) }
+            if !audioGate.active { beginOutput(.audio, now: now) }
+        } else if !audioGate.active { beginOutput(.audio, now: now) }
+        request(playlist, now: now)
     }
+
     func startProject(manual: Bool = true) {
         guard let store, !manual || !store.locked else { return }
         let now = ProcessInfo.processInfo.systemUptime
+        recoveryLanes.removeAll()
         for lane in MediaLane.allCases { startOutput(lane, now: now) }
     }
     func endProject(manual: Bool = true) {
         guard let store, !manual || !store.locked else { return }
         let now = ProcessInfo.processInfo.systemUptime
+        recoveryLanes.removeAll()
         videoGate.end(duration: store.project.video.fades.fadeOut, now: now)
         audioGate.end(duration: store.project.audio.fades.fadeOut, now: now)
         readyRequests.removeAll()
     }
     func stopImmediately() {
+        recoveryLanes.removeAll()
         videoState.stop(); audioState.stop(); videoGate.stop(); audioGate.stop()
         videoMedia.stop(); audioMedia.stop(); readyRequests.removeAll(); output.close()
         store?.devices.restoreModes(); appliedDisplay = nil; appliedRate = nil
@@ -111,7 +123,12 @@ final class PlaybackEngine: ObservableObject {
         videoOpacity = 0; endActivity(); objectWillChange.send()
     }
     private func openVideo() throws {
-        guard let store, let id = store.selectedDisplay?.id else { throw OutputDevices.DeviceError.missingDisplay }
+        guard let store else { return }
+        guard let id = store.selectedDisplay?.id else {
+            output.close(); store.devices.restoreModes(); appliedDisplay = nil; appliedRate = nil
+            if store.project.displayID != nil || store.project.displayUUID != nil { throw OutputDevices.DeviceError.missingDisplay }
+            return // An unconfigured external display still allows the in-app preview.
+        }
         if appliedDisplay != id || appliedRate != store.project.refreshRate {
             output.close(); store.devices.restoreModes()
             try store.devices.activate4K(displayID: id, refreshRate: store.project.refreshRate)
@@ -134,19 +151,29 @@ final class PlaybackEngine: ObservableObject {
         appliedAudioUID = uid
         videoMedia.player.isMuted = false; audioMedia.player.isMuted = false
     }
+    /// Playback and preview continue independently of external device availability.
+    private func beginOutput(_ lane: MediaLane, now: TimeInterval) {
+        guard let store else { return }
+        if lane == .video {
+            videoGate.start(duration: store.project.video.fades.fadeIn, now: now)
+            do { try openVideo(); videoDisconnected = false }
+            catch { videoDisconnected = true; store.message = "映像出力先の再接続待ち：\(error.localizedDescription)" }
+        } else {
+            audioGate.start(duration: store.project.audio.fades.fadeIn, now: now)
+            do { try openAudio(); audioDisconnected = false }
+            catch {
+                audioDisconnected = true
+                videoMedia.player.isMuted = true; audioMedia.player.isMuted = true
+                store.message = "音声出力先の再接続待ち：\(error.localizedDescription)"
+            }
+        }
+    }
     private func startOutput(_ lane: MediaLane, now: TimeInterval) {
         guard let store else { return }
-        do {
-            if lane == .video { try openVideo(); videoGate.start(duration: store.project.video.fades.fadeIn, now: now) }
-            else { try openAudio(); audioGate.start(duration: store.project.audio.fades.fadeIn, now: now) }
-            let schedule = store.project.schedule(for: lane)
-            if let p = store.project.playlist(schedule.initialPlaylistID), p.lane == lane { request(p, now: now) }
-            else { store.message = "\(lane.title)のデフォルト再生プレイリストを設定してください。" }
-        } catch {
-            if lane == .video { videoGate.stop(); videoState.stop(); videoMedia.stop(); output.close(); store.devices.restoreModes(); appliedDisplay = nil; appliedRate = nil }
-            else { audioGate.stop(); audioState.stop(); audioMedia.stop() }
-            store.error = error.localizedDescription
-        }
+        beginOutput(lane, now: now)
+        let schedule = store.project.schedule(for: lane)
+        if let p = store.project.playlist(schedule.initialPlaylistID), p.lane == lane { request(p, now: now) }
+        else { store.message = "\(lane.title)のデフォルト再生プレイリストを設定してください。" }
     }
     private func request(_ p: Playlist, now: TimeInterval) {
         guard let store, !p.tracks.isEmpty else { store?.message = "空のプレイリストは再生できません。"; return }
@@ -167,27 +194,33 @@ final class PlaybackEngine: ObservableObject {
         if p.lane == .video { videoState.request(p, project: store.project, now: now) }
         else { audioState.request(p, project: store.project, now: now) }
     }
-    private func tick() {
+    func tick(date: Date = Date(), now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         guard let store else { return }
-        let now = ProcessInfo.processInfo.systemUptime, date = Date(), project = store.project
+        let project = store.project
         if !shuttingDown && (date.timeIntervalSince(lastScheduleDate) >= 0.2 || date < lastScheduleDate) {
             if date.timeIntervalSince(lastScheduleDate) > 86_400 {
-                for lane in MediaLane.allCases {
-                    if project.schedule(for: lane).contains(.at(date)) { startOutput(lane, now: now) }
-                    else { endOutput(lane, now: now) }
-                }
+                stopImmediately()
+                recoveryLanes = Set(MediaLane.allCases)
             } else {
                 for event in DailyScheduler.events(project: project, after: lastScheduleDate, through: date) {
+                    guard !recoveryLanes.contains(event.lane) else { continue }
                     switch event.action {
                     case .startOutput: startOutput(event.lane, now: now)
                     case .endOutput: endOutput(event.lane, now: now)
                     case .playlist(let id):
                         let gate = event.lane == .video ? videoGate : audioGate
-                        if gate.active && gate.phase != .fadingOut, let p = project.playlist(id) { request(p, now: now) }
+                        if let p = project.playlist(id), !p.tracks.isEmpty {
+                            if !gate.active || gate.phase == .fadingOut { beginOutput(event.lane, now: now) }
+                            request(p, now: now)
+                        }
                     }
                 }
             }
             lastScheduleDate = date
+        }
+        if !shuttingDown, now - lastRecoveryAttempt >= 0.2 {
+            lastRecoveryAttempt = now
+            for lane in recoveryLanes { recover(lane, at: date, now: now) }
         }
         for (lane, id) in readyRequests {
             if let p = project.playlist(id) {
@@ -225,15 +258,50 @@ final class PlaybackEngine: ObservableObject {
         if videoGate.active || audioGate.active { beginActivity() } else { endActivity() }
         objectWillChange.send()
     }
+    /// Wait for metadata, then calculate against the current wall clock rather than launch time.
+    private func recover(_ lane: MediaLane, at date: Date, now: TimeInterval) {
+        guard let store else { return }
+        guard let playback = DailyScheduler.playback(project: store.project, lane: lane, at: date, now: now) else {
+            recoveryLanes.remove(lane); endOutput(lane, now: now); return
+        }
+        let playlist = store.project.playlist(playback.state.playlistID)
+        let required = [playlist, store.project.playlist(playback.state.pendingID)].compactMap { $0 }.flatMap(\.tracks)
+        for track in required {
+            let url = track.resolvedURL(relativeTo: store.directory)
+            if case .failed(let error) = store.library.states[url] {
+                recoveryLanes.remove(lane); store.error = error; return
+            }
+            guard store.library.prepared(url) != nil else { return }
+        }
+        let media = lane == .video ? videoMedia : audioMedia
+        var position: ScheduledTrackPosition?
+        if let playlist {
+            let durations = playlist.tracks.map { track in
+                track.kind == .image ? track.imageDuration : store.library.prepared(track.resolvedURL(relativeTo: store.directory))!.duration
+            }
+            position = ScheduledTrackPosition.resolve(durations: durations, elapsed: playback.elapsed)
+            guard position != nil else { recoveryLanes.remove(lane); return }
+        }
+        if lane == .video { videoState = playback.state }
+        else { audioState = playback.state }
+        beginOutput(lane, now: now)
+        if let playlist, let position {
+            media.index = position.index
+            loadTrack(playlist, media: media, now: now)
+            media.resumeOffset = position.offset
+            media.resumeDate = date
+        }
+        recoveryLanes.remove(lane)
+    }
     func reconnectDevices() {
         guard let store else { return }
         if videoGate.active && videoGate.phase != .fadingOut {
             if store.selectedDisplay == nil {
-                if !videoDisconnected {
+                if output.displayID != nil {
                     output.close(); store.devices.restoreModes()
                     appliedDisplay = nil; appliedRate = nil
                 }
-                videoDisconnected = true
+                videoDisconnected = store.project.displayID != nil || store.project.displayUUID != nil
             } else if videoDisconnected || appliedDisplay != store.selectedDisplay?.id || appliedRate != store.project.refreshRate {
                 do {
                     try openVideo(); videoDisconnected = false
@@ -270,6 +338,7 @@ final class PlaybackEngine: ObservableObject {
         return store.project.playlist(state.playlistID)?.tracks.first { $0.id == media.trackID }
     }
     private func synchronize(lane: MediaLane, state: LanePlayback, media: LaneMedia, now: TimeInterval) {
+        guard !recoveryLanes.contains(lane) else { return }
         guard let store, let playlist = store.project.playlist(state.playlistID), !playlist.tracks.isEmpty else {
             if media.playlistID != nil { media.stop() }; return
         }
@@ -286,10 +355,29 @@ final class PlaybackEngine: ObservableObject {
             if lane == .video { videoState.stop() } else { audioState.stop() }; media.stop(); return
         }
         if !media.ready, media.image != nil || media.player.currentItem?.status == .readyToPlay {
-            media.ready = true; media.started = now
-            let fades = lane == .video ? store.project.defaults.videoTrackFades : store.project.defaults.audioTrackFades
-            media.envelope = Envelope(from: 0, to: 1, started: now, duration: min(fades.fadeIn, media.duration / 2))
-            if media.image == nil { media.player.play() }
+            guard !media.seeking else { return }
+            if let resumeDate = media.resumeDate {
+                media.resumeOffset += Date().timeIntervalSince(resumeDate)
+                media.resumeDate = nil
+                // Readiness may cross a track boundary; resolve the playlist again in that case.
+                if media.resumeOffset >= media.duration {
+                    recoveryLanes.insert(lane); media.stop(); return
+                }
+            }
+            if media.image == nil, media.resumeOffset > 0 {
+                media.seeking = true
+                let item = media.player.currentItem
+                let offset = media.resumeOffset
+                media.player.seek(to: CMTime(seconds: offset, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) { [weak self, weak media] finished in
+                    Task { @MainActor in
+                        guard let self, let media, media.player.currentItem === item else { return }
+                        media.seeking = false
+                        if finished { self.beginMediaPlayback(lane: lane, media: media, now: ProcessInfo.processInfo.systemUptime, offset: offset) }
+                    }
+                }
+                return
+            }
+            beginMediaPlayback(lane: lane, media: media, now: now, offset: media.resumeOffset)
         }
         guard media.ready else { return }
         let elapsed = media.image != nil ? now - (media.started ?? now) : media.player.currentTime().seconds
@@ -297,12 +385,19 @@ final class PlaybackEngine: ObservableObject {
         let out = min(fades.fadeOut, media.duration / 2)
         if !media.fadingOut && elapsed.isFinite && elapsed >= media.duration - out {
             media.fadingOut = true
-            media.envelope = Envelope(from: media.envelope.value(at: now), to: 0, started: now, duration: out)
+            media.envelope = Envelope(from: media.envelope.value(at: now), to: 0, started: now - max(0, elapsed - (media.duration - out)), duration: out)
         }
         if media.ended || (media.fadingOut && media.envelope.completed(at: now)) {
             media.index = (media.index + 1) % playlist.tracks.count
             loadTrack(playlist, media: media, now: now)
         }
+    }
+    private func beginMediaPlayback(lane: MediaLane, media: LaneMedia, now: TimeInterval, offset: Double) {
+        guard let store else { return }
+        media.ready = true; media.started = now - offset; media.resumeOffset = 0
+        let fades = lane == .video ? store.project.defaults.videoTrackFades : store.project.defaults.audioTrackFades
+        media.envelope = Envelope(from: 0, to: 1, started: now - offset, duration: min(fades.fadeIn, media.duration / 2))
+        if media.image == nil { media.player.play() }
     }
     private func loadTrack(_ playlist: Playlist, media: LaneMedia, now: TimeInterval) {
         guard let store, playlist.tracks.indices.contains(media.index) else { return }

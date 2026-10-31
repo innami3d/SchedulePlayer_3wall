@@ -27,6 +27,8 @@ final class PlayerStore: ObservableObject {
     enum Selection { case playlist, track }
     enum ClipboardItem { case playlist(Playlist), track(MediaTrack, MediaLane) }
     var hasItemSelection: Bool { selection == .track ? selectedTrack != nil : selectedPlaylist != nil }
+    private static let projectType = UTType(filenameExtension: "player", conformingTo: .json)
+        ?? UTType(exportedAs: "jp.namipi.geobox-player.project", conformingTo: .json)
     private let recentProjectKey = "GeoBoxPlayer.lastProjectPath"
     private let remembersProject: Bool
 
@@ -97,6 +99,10 @@ final class PlayerStore: ObservableObject {
             }
             self.prepareMedia()
         })
+    }
+    func selectProject() {
+        selectedPlaylistID = nil; selectedTrackID = nil; selection = .playlist
+        showingProject = true
     }
     func selectPlaylist(_ id: UUID) {
         selectedPlaylistID = id; selectedTrackID = nil; selection = .playlist; showingProject = false
@@ -215,7 +221,7 @@ final class PlayerStore: ObservableObject {
     }
     func openProject() {
         guard !locked, confirmDiscard() else { return }
-        let panel = NSOpenPanel(); panel.allowedContentTypes = [.json]; panel.allowsMultipleSelection = false
+        let panel = NSOpenPanel(); panel.allowedContentTypes = [Self.projectType, .json]; panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
         loadProject(at: url)
     }
@@ -228,7 +234,7 @@ final class PlayerStore: ObservableObject {
             let next = try PlayerProject.decode(Data(contentsOf: url))
             engine.stopImmediately(); project = next; fileURL = url; isDirty = false
             undoStack.removeAll(); redoStack.removeAll(); selectedPlaylistID = nil; selectedTrackID = nil
-            showingProject = true; prepareMedia(); engine.resetSchedule()
+            showingProject = true; prepareMedia(); engine.resetSchedule(reconcile: true)
             if remembersProject { UserDefaults.standard.set(url.path, forKey: recentProjectKey) }
         } catch { self.error = error.localizedDescription }
     }
@@ -236,8 +242,8 @@ final class PlayerStore: ObservableObject {
         guard !locked else { return false }
         var destination = fileURL
         if destination == nil || saveAs {
-            let panel = NSSavePanel(); panel.allowedContentTypes = [.json]; panel.nameFieldStringValue = project.name + ".geobox.json"
-            guard panel.runModal() == .OK, let url = panel.url else { return false }; destination = url
+            let panel = NSSavePanel(); panel.allowedContentTypes = [Self.projectType]; panel.nameFieldStringValue = project.name + ".player"
+            guard panel.runModal() == .OK, let url = panel.url else { return false }; destination = url.pathExtension.lowercased() == "player" ? url : url.appendingPathExtension("player")
         }
         guard let destination else { return false }
         do {
