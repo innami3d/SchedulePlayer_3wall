@@ -66,6 +66,7 @@ public struct OutputSchedule: Codable, Equatable {
 }
 
 public struct ProjectDefaults: Codable, Equatable {
+    public static let maximumImageDuration: Double = 604_800
     public var playlistFades = FadeSettings()
     public var videoTrackFades = FadeSettings(fadeIn: 0, fadeOut: 0)
     public var audioTrackFades = FadeSettings(fadeIn: 0, fadeOut: 0)
@@ -73,7 +74,7 @@ public struct ProjectDefaults: Codable, Equatable {
     public var volume: Double = 1
     public var muteVideo = false
     public var fadeMax: Double = 60
-    public var imageMax: Double = 3600
+    public var imageMax: Double = Self.maximumImageDuration
     public var volumeMin: Double = 0
     public var volumeMax: Double = 1
     public init() {}
@@ -97,6 +98,17 @@ public struct MediaTrack: Codable, Identifiable, Equatable {
     public func duplicated() -> Self { var copy = self; copy.id = UUID(); return copy }
 }
 
+public struct PlaylistPlaybackSettings: Codable, Equatable {
+    public var videoTrackFades: FadeSettings
+    public var audioTrackFades: FadeSettings
+    public var fadeColorHex: String
+    public init(defaults: ProjectDefaults = .init(), fadeColorHex: String = "#000000") {
+        videoTrackFades = defaults.videoTrackFades
+        audioTrackFades = defaults.audioTrackFades
+        self.fadeColorHex = fadeColorHex
+    }
+}
+
 public struct Playlist: Codable, Identifiable, Equatable {
     public var id: UUID
     public var name: String
@@ -106,9 +118,22 @@ public struct Playlist: Codable, Identifiable, Equatable {
     public var fades: FadeSettings
     public var muted: Bool
     public var tracks: [MediaTrack]
+    private var storedPlaybackSettings: PlaylistPlaybackSettings?
+    public var playbackSettings: PlaylistPlaybackSettings {
+        get { storedPlaybackSettings ?? .init() }
+        set { storedPlaybackSettings = newValue }
+    }
+    private enum CodingKeys: String, CodingKey {
+        case id, name, lane, start, scheduleOrder, fades, muted, tracks
+        case storedPlaybackSettings = "playbackSettings"
+    }
     public init(id: UUID = UUID(), name: String, lane: MediaLane, order: Int64 = 0, defaults: ProjectDefaults = .init()) {
         self.id = id; self.name = name; self.lane = lane; self.scheduleOrder = order
         self.fades = defaults.playlistFades; self.muted = lane == .video && defaults.muteVideo; self.tracks = []
+        storedPlaybackSettings = .init(defaults: defaults)
+    }
+    fileprivate mutating func inheritPlaybackSettings(defaults: ProjectDefaults, fadeColorHex: String) {
+        if storedPlaybackSettings == nil { storedPlaybackSettings = .init(defaults: defaults, fadeColorHex: fadeColorHex) }
     }
     public func duplicated(order: Int64) -> Self {
         var p = self; p.id = UUID(); p.name += " のコピー"; p.scheduleOrder = order
@@ -139,14 +164,22 @@ public struct PlayerProject: Codable, Equatable {
         return try encoder.encode(self)
     }
     public static func decode(_ data: Data) throws -> Self {
-        let project = try JSONDecoder().decode(Self.self, from: data)
+        var project = try JSONDecoder().decode(Self.self, from: data)
         guard project.schemaVersion == 1 else { throw ProjectError.unsupportedVersion }
-        try project.validate(); return project
+        for index in project.playlists.indices {
+            project.playlists[index].inheritPlaybackSettings(defaults: project.defaults, fadeColorHex: project.fadeColorHex)
+        }
+        try project.validate()
+        // Upgrade the former default so existing projects also support long images.
+        if project.defaults.imageMax == 3600 {
+            project.defaults.imageMax = ProjectDefaults.maximumImageDuration
+        }
+        return project
     }
     public func validate() throws {
         func finite(_ value: Double, _ range: ClosedRange<Double>) -> Bool { value.isFinite && range.contains(value) }
         guard finite(refreshRate, 1...240), finite(defaults.fadeMax, 0...86_400),
-              finite(defaults.imageMax, 0.1...604_800), finite(defaults.volumeMin, 0...1),
+              finite(defaults.imageMax, 0.1...ProjectDefaults.maximumImageDuration), finite(defaults.volumeMin, 0...1),
               finite(defaults.volumeMax, defaults.volumeMin...1),
               finite(defaults.imageDuration, 0.1...defaults.imageMax),
               finite(defaults.volume, defaults.volumeMin...defaults.volumeMax),
@@ -160,6 +193,11 @@ public struct PlayerProject: Codable, Equatable {
         }
         for p in playlists {
             guard (0...86_399).contains(p.start.seconds), Set(p.tracks.map(\.id)).count == p.tracks.count else { throw ProjectError.invalidValues }
+            let settings = p.playbackSettings
+            guard settings.fadeColorHex.range(of: "^#[0-9a-fA-F]{6}$", options: .regularExpression) != nil else { throw ProjectError.invalidValues }
+            for f in [settings.videoTrackFades, settings.audioTrackFades] {
+                guard finite(f.fadeIn, 0...defaults.fadeMax), finite(f.fadeOut, 0...defaults.fadeMax) else { throw ProjectError.invalidValues }
+            }
             for t in p.tracks {
                 guard !t.path.isEmpty, t.kind.accepts(p.lane), finite(t.volume, 0...1),
                       finite(t.imageDuration, 0.1...defaults.imageMax) else { throw ProjectError.invalidValues }

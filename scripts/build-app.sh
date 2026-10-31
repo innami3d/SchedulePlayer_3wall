@@ -8,6 +8,9 @@ swift build "${BUILD_ARGS[@]}" --product GeoBoxPlayer
 BIN_DIR="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
 APP_DIR="$PROJECT_ROOT/dist/GeoBox Player.app"
 mkdir -p "$APP_DIR/Contents/MacOS"
+bash "$PROJECT_ROOT/scripts/build-icon.sh"
+mkdir -p "$APP_DIR/Contents/Resources"
+cp "$PROJECT_ROOT/Resources/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
 cp "$BIN_DIR/GeoBoxPlayer" "$APP_DIR/Contents/MacOS/GeoBoxPlayer"
 cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -17,6 +20,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIdentifier</key><string>jp.namipi.GeoBoxPlayer</string>
 <key>CFBundleName</key><string>GeoBox Player</string>
 <key>CFBundleDisplayName</key><string>GeoBox Player</string>
+<key>CFBundleIconFile</key><string>AppIcon.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>0.1.0</string>
 <key>CFBundleVersion</key><string>1</string>
@@ -28,6 +32,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <key>LSItemContentTypes</key><array><string>jp.namipi.geobox-player.project</string></array>
 <key>CFBundleTypeExtensions</key><array><string>player</string></array>
 <key>CFBundleTypeRole</key><string>Editor</string>
+<key>LSHandlerRank</key><string>Owner</string>
 </dict></array>
 <key>UTExportedTypeDeclarations</key><array><dict>
 <key>UTTypeIdentifier</key><string>jp.namipi.geobox-player.project</string>
@@ -40,4 +45,9 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 </dict></plist>
 PLIST
 codesign --force --sign - --identifier jp.namipi.GeoBoxPlayer "$APP_DIR"
+touch "$APP_DIR"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [[ -x "$LSREGISTER" ]]; then
+    "$LSREGISTER" -f "$APP_DIR"
+fi
 printf 'Built: %s\n' "$APP_DIR"

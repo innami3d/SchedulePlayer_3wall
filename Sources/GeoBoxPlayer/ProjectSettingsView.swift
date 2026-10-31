@@ -20,7 +20,11 @@ struct ProjectSettingsView: View {
             }
             Form {
                 Section("プロジェクト") {
-                    TextField("プロジェクト名", text: binding(\.name))
+                    LabeledContent("プロジェクト名") {
+                        Text(store.project.name).textSelection(.enabled)
+                    }
+                    Text("プロジェクト名はファイル名と同期します。変更するには「名前を付けて保存…」を使ってください。")
+                        .font(.caption).foregroundStyle(.secondary)
                     Text(store.fileURL?.path ?? "未保存のプロジェクト").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                 }
                 Section("映像出力 · 4K固定 / 1系統") {
@@ -56,28 +60,11 @@ struct ProjectSettingsView: View {
                     }
                     OutputScheduleFields(store: store, lane: .audio)
                 }
-                Section("共通再生設定") {
-                    HStack {
-                        NumberField(title: "映像トラック間 IN（秒）", value: binding(\.defaults.videoTrackFades.fadeIn), range: 0...safeFadeMax)
-                        NumberField(title: "映像トラック間 OUT（秒）", value: binding(\.defaults.videoTrackFades.fadeOut), range: 0...safeFadeMax)
-                    }
-                    HStack {
-                        NumberField(title: "音声トラック間 IN（秒）", value: binding(\.defaults.audioTrackFades.fadeIn), range: 0...safeFadeMax)
-                        NumberField(title: "音声トラック間 OUT（秒）", value: binding(\.defaults.audioTrackFades.fadeOut), range: 0...safeFadeMax)
-                    }
-                    ColorPicker("映像フェード先", selection: Binding(get: { Color(nsColor: NSColor(hex: store.project.fadeColorHex)) }, set: { color in
-                        guard let c = NSColor(color).usingColorSpace(.sRGB) else { return }
-                        store.change { $0.fadeColorHex = String(format: "#%02X%02X%02X", Int(c.redComponent * 255), Int(c.greenComponent * 255), Int(c.blueComponent * 255)) }
-                    }), supportsOpacity: false)
-                    Text("トラック間フェードは全対象に適用し、0秒でフェードなしになります。")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
             }.formStyle(.grouped).disabled(store.locked)
             Text("時刻は日付なしで毎日適用。終了時刻に全体のフェードアウトを開始します。")
                 .font(.caption).foregroundStyle(.secondary)
         }.padding(24)
     }
-    private var safeFadeMax: Double { max(0, store.project.defaults.fadeMax) }
     private var rates: [Double] { store.selectedDisplay?.rates ?? [] }
 }
 
@@ -135,11 +122,71 @@ struct NumberField: View {
     var title: String
     @Binding var value: Double
     var range: ClosedRange<Double>
+    var maximumFractionDigits: Int = 3
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title).font(.caption).foregroundStyle(.secondary)
-            TextField(title, value: Binding(get: { value }, set: { if $0.isFinite { value = min(range.upperBound, max(range.lowerBound, $0)) } }), format: .number.precision(.fractionLength(0...3)))
+            TextField(title, value: Binding(get: { value }, set: { if $0.isFinite { value = min(range.upperBound, max(range.lowerBound, $0)) } }), format: .number.precision(.fractionLength(0...maximumFractionDigits)))
                 .textFieldStyle(.roundedBorder).monospacedDigit()
         }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+enum ImageDurationUnit: String, CaseIterable, Identifiable {
+    case hours = "時間", minutes = "分", seconds = "秒"
+    var id: Self { self }
+    var secondsPerUnit: Double {
+        switch self {
+        case .seconds: return 1
+        case .minutes: return 60
+        case .hours: return 3600
+        }
+    }
+}
+
+struct ImageDurationField: View {
+    @Binding var seconds: Double
+    var maximum: Double
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("画像表示時間").font(.caption).foregroundStyle(.secondary)
+            HStack {
+                ForEach(ImageDurationUnit.allCases) { component in
+                    NumberField(title: component.rawValue, value: value(in: component),
+                                range: range(for: component),
+                                maximumFractionDigits: component == .seconds ? 3 : 0)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityLabel("画像表示時間・\(component.rawValue)")
+                }
+            }
+        }
+    }
+
+    private func range(for component: ImageDurationUnit) -> ClosedRange<Double> {
+        switch component {
+        case .hours: return 0...floor(maximum / 3600)
+        case .minutes: return 0...59
+        case .seconds: return 0...59.999
+        }
+    }
+
+    private func componentValue(_ component: ImageDurationUnit) -> Double {
+        switch component {
+        case .hours: return floor(seconds / 3600)
+        case .minutes: return floor(seconds / 60).truncatingRemainder(dividingBy: 60)
+        case .seconds: return seconds.truncatingRemainder(dividingBy: 60)
+        }
+    }
+
+    func value(in component: ImageDurationUnit) -> Binding<Double> {
+        Binding(get: { componentValue(component) }, set: { value in
+            guard value.isFinite else { return }
+            let bounds = range(for: component)
+            let clamped = min(bounds.upperBound, max(bounds.lowerBound, value))
+            let replacement = component == .seconds ? clamped : floor(clamped)
+            let converted = seconds + (replacement - componentValue(component)) * component.secondsPerUnit
+            seconds = min(maximum, max(0.1, converted))
+        })
     }
 }

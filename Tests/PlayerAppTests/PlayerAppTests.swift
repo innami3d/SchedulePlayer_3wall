@@ -5,6 +5,128 @@ import PlayerCore
 @testable import GeoBoxPlayer
 
 final class PlayerAppTests: XCTestCase {
+    @MainActor func testTrackInterruptionLoadingLockRestartAndContinuation() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 16, pixelsHigh: 16,
+                                      bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                      colorSpaceName: .calibratedRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        let urls = (0..<3).map { directory.appendingPathComponent("\($0).png") }
+        for url in urls { try bitmap.representation(using: .png, properties: [:])!.write(to: url) }
+        let store = PlayerStore(restoreLastProject: false)
+        store.createPlaylist(.video)
+        store.addFiles(urls)
+        store.playlistBinding(\.playbackSettings.videoTrackFades.fadeIn, fallback: 0).wrappedValue = 2
+        store.playlistBinding(\.playbackSettings.fadeColorHex, fallback: "#000000").wrappedValue = "#123456"
+        let playlist = try XCTUnwrap(store.selectedPlaylist)
+        let engine = store.engine
+        defer { engine.stopImmediately() }
+
+        // A later click replaces a request that is still waiting for media.
+        engine.playTrack(playlist.tracks[0].id, in: playlist.id)
+        engine.playTrack(playlist.tracks[1].id, in: playlist.id)
+        for _ in 0..<100 {
+            engine.tick()
+            if engine.videoMedia.ready { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(engine.currentTrack(.video)?.id, playlist.tracks[1].id)
+        XCTAssertTrue(engine.videoMedia.ready)
+        XCTAssertEqual(engine.videoMedia.envelope.duration, 2)
+        XCTAssertEqual(engine.videoFadeColorHex, "#123456")
+        let project = store.project
+        store.locked = true
+        engine.playTrack(playlist.tracks[0].id, in: playlist.id)
+        XCTAssertEqual(engine.currentTrack(.video)?.id, playlist.tracks[1].id)
+        store.locked = false
+
+        // Clicking the playing track restarts it; its natural successor follows.
+        engine.playTrack(playlist.tracks[1].id, in: playlist.id)
+        XCTAssertFalse(engine.videoMedia.ready)
+        engine.tick()
+        let started = try XCTUnwrap(engine.videoMedia.started)
+        engine.tick(now: started + 21)
+        XCTAssertEqual(engine.currentTrack(.video)?.id, playlist.tracks[2].id)
+        engine.tick(now: started + 22)
+        engine.tick(now: started + 43)
+        XCTAssertEqual(engine.currentTrack(.video)?.id, playlist.tracks[0].id)
+        XCTAssertEqual(store.project, project, "Manual playback must not edit the project")
+
+        store.createPlaylist(.video)
+        store.addFiles([urls[0]])
+        let other = try XCTUnwrap(store.selectedPlaylist)
+        engine.playTrack(other.tracks[0].id, in: other.id)
+        XCTAssertEqual(engine.videoState.playlistID, other.id)
+        XCTAssertEqual(engine.currentTrack(.video)?.id, other.tracks[0].id)
+        XCTAssertEqual(engine.videoFadeColorHex, "#000000")
+        engine.playTrack(UUID(), in: playlist.id)
+        XCTAssertEqual(engine.videoState.playlistID, other.id)
+    }
+
+    @MainActor func testLongImageDurationForNewAndLegacyProjects() throws {
+        for legacy in [false, true] {
+            let store = PlayerStore(restoreLastProject: false)
+            if legacy {
+                var old = PlayerProject()
+                old.defaults.imageMax = 3600
+                store.project = try PlayerProject.decode(old.encoded())
+            }
+            store.createPlaylist(.video)
+            store.addFiles([URL(fileURLWithPath: "/tmp/long-still.jpg")])
+            store.selectTrack(try XCTUnwrap(store.selectedPlaylist?.tracks.first?.id))
+            let field = ImageDurationField(seconds: store.trackBinding(\.imageDuration, fallback: 20),
+                                           maximum: store.project.defaults.imageMax)
+            field.value(in: .hours).wrappedValue = 25
+            field.value(in: .minutes).wrappedValue = 30
+            field.value(in: .seconds).wrappedValue = 15.5
+            XCTAssertEqual(store.selectedTrack?.imageDuration, 91815.5)
+            let restored = try PlayerProject.decode(store.project.encoded())
+            XCTAssertEqual(restored.playlists[0].tracks[0].imageDuration, 91815.5)
+            XCTAssertEqual(ScheduledTrackPosition.resolve(durations: [91815.5, 20], elapsed: 7200)?.index, 0)
+            XCTAssertEqual(ScheduledTrackPosition.resolve(durations: [91815.5, 20], elapsed: 91815.5)?.index, 1)
+            field.value(in: .hours).wrappedValue = 168
+            XCTAssertEqual(store.selectedTrack?.imageDuration, 604800)
+            XCTAssertNoThrow(try store.project.validate())
+        }
+    }
+
+    @MainActor func testImageDurationComponentsPreserveOtherFieldsAndProjectCompatibility() throws {
+        let store = PlayerStore(restoreLastProject: false)
+        store.createPlaylist(.video)
+        store.change { $0.defaults.imageMax = 10800 }
+        store.addFiles([URL(fileURLWithPath: "/tmp/still.jpg")])
+        store.selectTrack(try XCTUnwrap(store.selectedPlaylist?.tracks.first?.id))
+        let field = ImageDurationField(seconds: store.trackBinding(\.imageDuration, fallback: 20), maximum: 10800)
+
+        XCTAssertEqual(field.value(in: .seconds).wrappedValue, 20)
+        XCTAssertEqual(field.value(in: .minutes).wrappedValue, 0)
+        XCTAssertEqual(field.value(in: .hours).wrappedValue, 0)
+        field.value(in: .hours).wrappedValue = 1
+        field.value(in: .minutes).wrappedValue = 2
+        field.value(in: .seconds).wrappedValue = 3.5
+        XCTAssertEqual(store.selectedTrack?.imageDuration, 3723.5)
+        XCTAssertEqual(field.value(in: .hours).wrappedValue, 1)
+        XCTAssertEqual(field.value(in: .minutes).wrappedValue, 2)
+        XCTAssertEqual(field.value(in: .seconds).wrappedValue, 3.5)
+        let restored = try PlayerProject.decode(store.project.encoded())
+        XCTAssertEqual(restored.playlists[0].tracks[0].imageDuration, 3723.5)
+        store.undo()
+        XCTAssertEqual(store.selectedTrack?.imageDuration, 3740)
+
+        field.value(in: .hours).wrappedValue = 3
+        XCTAssertEqual(store.selectedTrack?.imageDuration, 10800)
+        field.value(in: .hours).wrappedValue = 0
+        XCTAssertEqual(store.selectedTrack?.imageDuration, 0.1)
+        field.value(in: .seconds).wrappedValue = 0
+        XCTAssertEqual(store.selectedTrack?.imageDuration, 0.1)
+        field.value(in: .seconds).wrappedValue = .nan
+        XCTAssertEqual(store.selectedTrack?.imageDuration, 0.1)
+        store.locked = true
+        field.value(in: .minutes).wrappedValue = 1
+        XCTAssertEqual(store.selectedTrack?.imageDuration, 0.1)
+    }
+
     @MainActor func testEditingLockCopyDeleteAndReorder() {
         let store = PlayerStore(restoreLastProject: false)
         store.createPlaylist(.video)
@@ -201,6 +323,8 @@ extension PlayerAppTests {
         store.project.audio.end = .at(date.addingTimeInterval(60))
         store.project.audio.fades = .init(fadeIn: 0, fadeOut: 0)
         var playlist = Playlist(name: "Scheduled audio", lane: .audio)
+        playlist.playbackSettings.audioTrackFades = .init(fadeIn: 8, fadeOut: 4)
+        playlist.playbackSettings.videoTrackFades = .init(fadeIn: 1, fadeOut: 2)
         playlist.tracks = [.init(path: url.path, kind: .audio)]
         playlist.start = store.project.audio.start
         store.project.playlists = [playlist]; store.project.audio.initialPlaylistID = playlist.id
@@ -217,6 +341,7 @@ extension PlayerAppTests {
         XCTAssertEqual(store.engine.audioMedia.trackID, playlist.tracks[0].id)
         XCTAssertTrue(store.engine.audioMedia.ready)
         XCTAssertEqual(store.engine.audioMedia.player.currentTime().seconds, 60, accuracy: 3)
+        XCTAssertEqual(store.engine.audioMedia.envelope.duration, 8)
         XCTAssertFalse(store.engine.videoGate.active)
         store.engine.endProject()
         store.engine.tick()
@@ -299,13 +424,45 @@ extension PlayerAppTests {
             try original.encoded().write(to: url)
             let store = PlayerStore(restoreLastProject: false)
             store.openProject(at: url)
-            store.change { $0.name = "After" }
+            XCTAssertEqual(store.project.name, url.deletingPathExtension().lastPathComponent)
+            XCTAssertFalse(store.isDirty)
+            store.change { $0.defaults.imageDuration = 30 }
             XCTAssertTrue(store.isDirty)
             XCTAssertTrue(store.save())
             XCTAssertEqual(store.fileURL, url)
             XCTAssertFalse(store.isDirty)
-            XCTAssertEqual(try PlayerProject.decode(Data(contentsOf: url)).name, "After")
+            let saved = try PlayerProject.decode(Data(contentsOf: url))
+            XCTAssertEqual(saved.name, url.deletingPathExtension().lastPathComponent)
+            XCTAssertEqual(saved.defaults.imageDuration, 30)
         }
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).count, 3)
+    }
+
+    @MainActor func testProjectNameFollowsSaveDestinationAndRenamedFile() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = PlayerStore(restoreLastProject: false)
+        XCTAssertEqual(store.project.name, "新規プロジェクト")
+        let destination = directory.appendingPathComponent("展示.夜間.player")
+        store.fileURL = destination
+        XCTAssertTrue(store.save())
+        XCTAssertEqual(store.project.name, "展示.夜間")
+        XCTAssertEqual(try PlayerProject.decode(Data(contentsOf: destination)).name, "展示.夜間")
+
+        let renamed = directory.appendingPathComponent("展示.昼間.player")
+        try FileManager.default.moveItem(at: destination, to: renamed)
+        store.openProject(at: renamed)
+        XCTAssertEqual(store.project.name, "展示.昼間")
+        XCTAssertTrue(store.save())
+        XCTAssertEqual(try PlayerProject.decode(Data(contentsOf: renamed)).name, "展示.昼間")
+        store.change { $0.defaults.imageDuration = 45 }
+        store.undo()
+        XCTAssertEqual(store.project.name, "展示.昼間")
+        store.redo()
+        XCTAssertEqual(store.project.name, "展示.昼間")
+        XCTAssertTrue(store.save())
+        store.newProject()
+        XCTAssertEqual(store.project.name, "新規プロジェクト")
     }
 }

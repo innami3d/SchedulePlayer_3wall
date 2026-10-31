@@ -136,6 +136,7 @@ struct PlaylistEditor: View {
     @ObservedObject var library: MediaLibrary
     @State private var targeted: UUID?
     @State private var dropAtEnd = false
+    @State private var hoveredTrackID: UUID?
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             if let playlist = store.selectedPlaylist {
@@ -158,6 +159,24 @@ struct PlaylistEditor: View {
                     if playlist.lane == .video {
                         Toggle("プレイリスト全体をミュート", isOn: store.playlistBinding(\.muted, fallback: false)).toggleStyle(.switch)
                     }
+                    GroupBox("トラック間の再生設定") {
+                        VStack(alignment: .leading, spacing: 14) {
+                            HStack {
+                                NumberField(title: "映像トラック間 IN（秒）", value: store.playlistBinding(\.playbackSettings.videoTrackFades.fadeIn, fallback: 0), range: 0...max(0, store.project.defaults.fadeMax))
+                                NumberField(title: "映像トラック間 OUT（秒）", value: store.playlistBinding(\.playbackSettings.videoTrackFades.fadeOut, fallback: 0), range: 0...max(0, store.project.defaults.fadeMax))
+                            }
+                            HStack {
+                                NumberField(title: "音声トラック間 IN（秒）", value: store.playlistBinding(\.playbackSettings.audioTrackFades.fadeIn, fallback: 0), range: 0...max(0, store.project.defaults.fadeMax))
+                                NumberField(title: "音声トラック間 OUT（秒）", value: store.playlistBinding(\.playbackSettings.audioTrackFades.fadeOut, fallback: 0), range: 0...max(0, store.project.defaults.fadeMax))
+                            }
+                            ColorPicker("映像フェード先", selection: Binding(get: { Color(nsColor: NSColor(hex: playlist.playbackSettings.fadeColorHex)) }, set: { color in
+                                guard let c = NSColor(color).usingColorSpace(.sRGB) else { return }
+                                store.playlistBinding(\.playbackSettings.fadeColorHex, fallback: "#000000").wrappedValue = String(format: "#%02X%02X%02X", Int(c.redComponent * 255), Int(c.greenComponent * 255), Int(c.blueComponent * 255))
+                            }), supportsOpacity: false)
+                            Text("このプレイリスト内のトラックに適用します。0秒でフェードなしになります。")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                 }.disabled(store.locked)
                 HStack {
                     Text("トラック").font(.headline)
@@ -170,6 +189,7 @@ struct PlaylistEditor: View {
                         Text("ファイル").frame(maxWidth: .infinity, alignment: .leading)
                         Text("種類").frame(width: 45)
                         Text("表示時間 / 尺").frame(width: 110, alignment: .trailing)
+                        Color.clear.frame(width: 28, height: 1)
                     }.font(.caption).foregroundStyle(.secondary).padding(10)
                     Divider()
                     ForEach(Array(playlist.tracks.enumerated()), id: \.element.id) { index, track in
@@ -194,17 +214,36 @@ struct PlaylistEditor: View {
         }.padding(24)
     }
     private func trackRow(_ track: MediaTrack, index: Int) -> some View {
-        Button { store.selectTrack(track.id) } label: {
-            HStack {
-                HStack(spacing: 4) { Image(systemName: "line.3.horizontal").foregroundStyle(.tertiary); Text("\(index + 1)").monospacedDigit() }.frame(width: 38)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(track.filename).lineLimit(1).truncationMode(.middle)
-                    if engine.currentTrack(store.selectedPlaylist?.lane ?? .video)?.id == track.id { Text("再生中").font(.caption).foregroundStyle(.tint) }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-                Text(track.kind.title).foregroundStyle(.secondary).frame(width: 45)
-                Text(duration(track)).monospacedDigit().foregroundStyle(.secondary).frame(width: 110, alignment: .trailing)
-            }.padding(10).contentShape(Rectangle())
-        }.buttonStyle(.plain)
+        HStack(spacing: 0) {
+            Button { store.selectTrack(track.id) } label: {
+                HStack {
+                    HStack(spacing: 4) { Image(systemName: "line.3.horizontal").foregroundStyle(.tertiary); Text("\(index + 1)").monospacedDigit() }.frame(width: 38)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(track.filename).lineLimit(1).truncationMode(.middle)
+                        if engine.currentTrack(store.selectedPlaylist?.lane ?? .video)?.id == track.id { Text("再生中").font(.caption).foregroundStyle(.tint) }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                    Text(track.kind.title).foregroundStyle(.secondary).frame(width: 45)
+                    Text(duration(track)).monospacedDigit().foregroundStyle(.secondary).frame(width: 110, alignment: .trailing)
+                }.padding(10).contentShape(Rectangle())
+            }.buttonStyle(.plain)
+            Button {
+                guard let playlist = store.selectedPlaylist else { return }
+                engine.playTrack(track.id, in: playlist.id)
+            } label: {
+                Image(systemName: "play.fill").frame(width: 28, height: 28)
+            }
+            .buttonStyle(.borderless)
+            .help("このトラックに割り込んで再生")
+            .accessibilityLabel("\(track.filename)を再生")
+            .disabled(store.locked)
+            .opacity(hoveredTrackID == track.id ? 1 : 0)
+            .allowsHitTesting(hoveredTrackID == track.id)
+            .accessibilityHidden(hoveredTrackID != track.id)
+        }
+            .onHover { hovering in
+                if hovering { hoveredTrackID = track.id }
+                else if hoveredTrackID == track.id { hoveredTrackID = nil }
+            }
             .background(store.selectedTrackID == track.id ? Color.accentColor.opacity(0.12) : .clear)
             .background(ContextSelectionObserver { store.selectTrack(track.id) })
             .contextMenu { ItemEditMenu(store: store) }
@@ -237,7 +276,7 @@ struct TrackInspector: View {
                         .disabled(track.kind == .image)
                 }
                 if track.kind == .image {
-                    NumberField(title: "画像表示時間（秒）", value: store.trackBinding(\.imageDuration, fallback: 20), range: 0.1...store.project.defaults.imageMax)
+                    ImageDurationField(seconds: store.trackBinding(\.imageDuration, fallback: 20), maximum: store.project.defaults.imageMax)
                 }
             }
             Text(library.states[track.resolvedURL(relativeTo: store.directory)]?.title ?? "読み込み待ち")
