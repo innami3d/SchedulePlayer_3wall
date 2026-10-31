@@ -94,7 +94,7 @@ public struct OutputGate {
 public enum AudioSuppression {
     public static func reasons(audioPlaylistActive: Bool, videoMuted: Bool, audioOutputActive: Bool) -> [String] {
         var result: [String] = []
-        if audioPlaylistActive { result.append("音声プレイリスト再生中のため動画内音声を抑制") }
+        if audioPlaylistActive { result.append("映像プレイリスト音声をミュート中") }
         if videoMuted { result.append("映像プレイリストをミュート中") }
         if !audioOutputActive { result.append("音声出力は停止中") }
         return result

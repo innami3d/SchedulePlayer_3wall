@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import CoreAudio
+import ColorSync
 
 @MainActor
 final class OutputDevices: ObservableObject {
@@ -8,6 +9,7 @@ final class OutputDevices: ObservableObject {
         var id: CGDirectDisplayID
         var name: String
         var rates: [Double]
+        var uuid: String? = nil
     }
     struct Audio: Identifiable { var id: String; var name: String }
     @Published private(set) var displays: [Display] = []
@@ -25,7 +27,9 @@ final class OutputDevices: ObservableObject {
         displays = NSScreen.screens.compactMap { screen in
             guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32 else { return nil }
             let rates = Array(Set(Self.modes(id).map(\.refreshRate).filter { $0 > 0 })).sorted()
-            return Display(id: id, name: screen.localizedName, rates: rates)
+            let uuid = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue()
+            return Display(id: id, name: screen.localizedName, rates: rates,
+                           uuid: uuid.map { CFUUIDCreateString(nil, $0) as String })
         }
         var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
         var size: UInt32 = 0
@@ -40,6 +44,11 @@ final class OutputDevices: ObservableObject {
                   let uid = Self.string(id, kAudioDevicePropertyDeviceUID), let name = Self.string(id, kAudioObjectPropertyName) else { return nil }
             return Audio(id: uid, name: name)
         }
+    }
+    static func matchingDisplay(id: UInt32?, uuid: String?, in displays: [Display]) -> Display? {
+        // Once a persistent identity exists, never fall back to a recycled display number.
+        if let uuid { return displays.first { $0.uuid == uuid } }
+        return displays.first { $0.id == id }
     }
     private static func string(_ id: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String? {
         var address = AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)

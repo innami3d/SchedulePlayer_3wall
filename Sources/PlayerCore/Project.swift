@@ -120,6 +120,9 @@ public struct PlayerProject: Codable, Equatable {
     public var schemaVersion = 1
     public var name = "新規プロジェクト"
     public var displayID: UInt32?
+    public var displayUUID: String?
+    public var displayName: String?
+    public var audioDeviceName: String?
     public var audioDeviceUID: String?
     public var refreshRate: Double = 30
     public var fadeColorHex = "#000000"

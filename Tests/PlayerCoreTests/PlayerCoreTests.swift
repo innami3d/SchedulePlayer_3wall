@@ -80,3 +80,17 @@ final class PlayerCoreTests: XCTestCase {
         XCTAssertTrue(AudioSuppression.reasons(audioPlaylistActive: false, videoMuted: false, audioOutputActive: true).isEmpty)
     }
 }
+
+extension PlayerCoreTests {
+    func testRememberedOutputDevicesRoundTripAndLegacyProject() throws {
+        var project = PlayerProject()
+        project.displayID = 10; project.displayUUID = "display-uuid"; project.displayName = "GeoBox"
+        project.audioDeviceUID = "audio-uid"; project.audioDeviceName = "Audio Interface"
+        XCTAssertEqual(try PlayerProject.decode(project.encoded()), project)
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: project.encoded()) as? [String: Any])
+        for key in ["displayUUID", "displayName", "audioDeviceName"] { legacy.removeValue(forKey: key) }
+        let restored = try PlayerProject.decode(JSONSerialization.data(withJSONObject: legacy))
+        XCTAssertEqual(restored.displayID, 10); XCTAssertEqual(restored.audioDeviceUID, "audio-uid")
+        XCTAssertNil(restored.displayUUID)
+    }
+}

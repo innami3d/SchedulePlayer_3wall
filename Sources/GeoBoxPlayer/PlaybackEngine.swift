@@ -44,9 +44,11 @@ final class PlaybackEngine: ObservableObject {
     private var appliedDisplay: UInt32?
     private var appliedRate: Double?
     private var shuttingDown = false
+    private(set) var videoDisconnected = false
+    private(set) var audioDisconnected = false
     var videoOpacity: Double = 0
     var status: String {
-        "映像：\(videoState.phase.title) ／ 音声：\(audioState.phase.title)"
+        "映像：\(videoDisconnected ? "機器の再接続待ち" : videoState.phase.title) ／ 音声：\(audioDisconnected ? "機器の再接続待ち" : audioState.phase.title)"
     }
     var suppressionReasons: [String] {
         guard let store else { return [] }
@@ -58,6 +60,7 @@ final class PlaybackEngine: ObservableObject {
     func startClock() {
         guard timer == nil else { return }
         lastScheduleDate = Date()
+        store?.rememberDeviceIdentities()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
@@ -103,10 +106,12 @@ final class PlaybackEngine: ObservableObject {
         videoState.stop(); audioState.stop(); videoGate.stop(); audioGate.stop()
         videoMedia.stop(); audioMedia.stop(); readyRequests.removeAll(); output.close()
         store?.devices.restoreModes(); appliedDisplay = nil; appliedRate = nil
+        videoDisconnected = false; audioDisconnected = false
+        videoMedia.player.isMuted = false; audioMedia.player.isMuted = false
         videoOpacity = 0; endActivity(); objectWillChange.send()
     }
     private func openVideo() throws {
-        guard let store, let id = store.project.displayID else { throw OutputDevices.DeviceError.missingDisplay }
+        guard let store, let id = store.selectedDisplay?.id else { throw OutputDevices.DeviceError.missingDisplay }
         if appliedDisplay != id || appliedRate != store.project.refreshRate {
             output.close(); store.devices.restoreModes()
             try store.devices.activate4K(displayID: id, refreshRate: store.project.refreshRate)
@@ -127,6 +132,7 @@ final class PlaybackEngine: ObservableObject {
         videoMedia.player.audioOutputDeviceUniqueID = uid
         audioMedia.player.audioOutputDeviceUniqueID = uid
         appliedAudioUID = uid
+        videoMedia.player.isMuted = false; audioMedia.player.isMuted = false
     }
     private func startOutput(_ lane: MediaLane, now: TimeInterval) {
         guard let store else { return }
@@ -135,7 +141,7 @@ final class PlaybackEngine: ObservableObject {
             else { try openAudio(); audioGate.start(duration: store.project.audio.fades.fadeIn, now: now) }
             let schedule = store.project.schedule(for: lane)
             if let p = store.project.playlist(schedule.initialPlaylistID), p.lane == lane { request(p, now: now) }
-            else { store.message = "\(lane.title)の開始プレイリストを設定してください。" }
+            else { store.message = "\(lane.title)のデフォルト再生プレイリストを設定してください。" }
         } catch {
             if lane == .video { videoGate.stop(); videoState.stop(); videoMedia.stop(); output.close(); store.devices.restoreModes(); appliedDisplay = nil; appliedRate = nil }
             else { audioGate.stop(); audioState.stop(); audioMedia.stop() }
@@ -213,16 +219,45 @@ final class PlaybackEngine: ObservableObject {
         if now - lastDeviceCheck > 2 {
             lastDeviceCheck = now; store.devices.refresh()
             store.library.refreshIfChanged(project: project, directory: store.directory)
-            if videoGate.active, let id = appliedDisplay, !store.devices.displays.contains(where: { $0.id == id }) {
-                videoGate.stop(); videoState.stop(); videoMedia.stop(); output.close(); store.error = "映像出力先が切断されました。"
-            }
-            if audioGate.active, let uid = appliedAudioUID, !store.devices.audio.contains(where: { $0.id == uid }) {
-                audioGate.stop(); audioState.stop(); audioMedia.stop(); videoMedia.player.isMuted = true
-                store.error = "音声出力先が切断されました。"
-            } else { videoMedia.player.isMuted = false }
+            store.rememberDeviceIdentities()
+            reconnectDevices()
         }
         if videoGate.active || audioGate.active { beginActivity() } else { endActivity() }
         objectWillChange.send()
+    }
+    func reconnectDevices() {
+        guard let store else { return }
+        if videoGate.active && videoGate.phase != .fadingOut {
+            if store.selectedDisplay == nil {
+                if !videoDisconnected {
+                    output.close(); store.devices.restoreModes()
+                    appliedDisplay = nil; appliedRate = nil
+                }
+                videoDisconnected = true
+            } else if videoDisconnected || appliedDisplay != store.selectedDisplay?.id || appliedRate != store.project.refreshRate {
+                do {
+                    try openVideo(); videoDisconnected = false
+                    store.message = "映像出力先へ自動接続しました。"
+                } catch {
+                    videoDisconnected = true
+                    store.message = "映像出力先の再接続待ち：\(error.localizedDescription)"
+                }
+            }
+        } else { videoDisconnected = false }
+        let audioMissing = store.project.audioDeviceUID.map { uid in
+            !store.devices.audio.contains { $0.id == uid }
+        } ?? false
+        if audioGate.active && audioGate.phase != .fadingOut {
+            if audioMissing {
+                audioDisconnected = true
+            } else if audioDisconnected || appliedAudioUID != store.project.audioDeviceUID {
+                applyAudioDevice(); audioDisconnected = false
+                store.message = "音声出力先へ自動接続しました。"
+            }
+        } else { audioDisconnected = false }
+        // AVPlayer may fall back to the system device when its selected device disappears.
+        videoMedia.player.isMuted = audioMissing
+        audioMedia.player.isMuted = audioMissing
     }
     private func endOutput(_ lane: MediaLane, now: TimeInterval) {
         guard let store else { return }; readyRequests[lane] = nil

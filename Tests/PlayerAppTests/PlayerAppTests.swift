@@ -147,3 +147,37 @@ extension PlayerAppTests {
         }
     }
 }
+
+extension PlayerAppTests {
+    @MainActor func testDisplayReconnectUsesPersistentIdentityInsteadOfRecycledNumber() {
+        let other = OutputDevices.Display(id: 10, name: "同じ名前", rates: [30], uuid: "other")
+        let reconnected = OutputDevices.Display(id: 99, name: "同じ名前", rates: [30], uuid: "saved")
+        XCTAssertEqual(OutputDevices.matchingDisplay(id: 10, uuid: "saved", in: [other, reconnected])?.id, 99)
+        XCTAssertNil(OutputDevices.matchingDisplay(id: 10, uuid: "saved", in: [other]))
+        XCTAssertEqual(OutputDevices.matchingDisplay(id: 10, uuid: nil, in: [other])?.id, 10)
+        XCTAssertNil(OutputDevices.matchingDisplay(id: nil, uuid: nil, in: [other]))
+    }
+}
+
+extension PlayerAppTests {
+    @MainActor func testMissingAudioMutesBothPlayersAndRecoversWithoutRestartingPlayback() {
+        let store = PlayerStore(restoreLastProject: false)
+        store.project.audio.fades = .init(fadeIn: 0, fadeOut: 0)
+        let engine = store.engine
+        engine.startProject()
+        defer { engine.stopImmediately() }
+        XCTAssertTrue(engine.audioGate.active)
+        store.project.audioDeviceUID = "missing-" + UUID().uuidString
+        engine.reconnectDevices()
+        XCTAssertTrue(engine.audioDisconnected)
+        XCTAssertTrue(engine.audioGate.active, "Keep the playback session alive while waiting for its device")
+        XCTAssertTrue(engine.videoMedia.player.isMuted); XCTAssertTrue(engine.audioMedia.player.isMuted)
+        store.project.audioDeviceUID = nil
+        engine.reconnectDevices()
+        XCTAssertFalse(engine.audioDisconnected)
+        XCTAssertFalse(engine.videoMedia.player.isMuted); XCTAssertFalse(engine.audioMedia.player.isMuted)
+        engine.endProject()
+        engine.reconnectDevices()
+        XCTAssertFalse(engine.audioGate.active, "A device becoming available must not restart a stopped output")
+    }
+}
