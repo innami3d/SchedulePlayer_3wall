@@ -10,6 +10,8 @@ struct SchedulerSettingsView: View {
     @State private var hoveredSlot: CalendarHoverSlot?
     @State private var resizePreview: CalendarResizePreview?
     @State private var movePreview: CalendarResizePreview?
+    @State private var rangePreview: CalendarRangePreview?
+    @GestureState private var isSelectingRange = false
     @GestureState private var isMoving = false
     @GestureState private var isResizing = false
     private let calendar = Calendar.current
@@ -43,7 +45,7 @@ struct SchedulerSettingsView: View {
             HStack(spacing: 16) {
                 Label("映像", systemImage: "circle.fill").foregroundStyle(.blue)
                 Label("音声", systemImage: "circle.fill").foregroundStyle(.orange)
-                Text("空き時間をダブルクリックで追加 · 左からドラッグで配置 · 予定本体をドラッグで移動・上下端で長さ調整")
+                Text("空き時間をなぞって予定を追加 · ダブルクリックでも追加 · 予定本体で移動・上下端で長さ調整")
                     .foregroundStyle(.secondary)
             }.font(.caption)
             calendarGrid
@@ -56,8 +58,10 @@ struct SchedulerSettingsView: View {
         }.padding(24)
             .onChange(of: isResizing) { _, active in if !active { resizePreview = nil } }
             .onChange(of: isMoving) { _, active in if !active { movePreview = nil } }
-            .onChange(of: store.locked) { _, _ in resizePreview = nil; movePreview = nil; hoveredSlot = nil }
-            .onChange(of: anchor) { _, _ in hoveredSlot = nil }
+            .onChange(of: isSelectingRange) { _, active in if !active { rangePreview = nil } }
+            .onChange(of: store.locked) { _, _ in resizePreview = nil; movePreview = nil; hoveredSlot = nil; rangePreview = nil }
+            .onChange(of: anchor) { _, _ in hoveredSlot = nil; rangePreview = nil }
+            .onChange(of: dayView) { _, _ in hoveredSlot = nil; rangePreview = nil }
             .sheet(item: $editing) { session in
                 CalendarEntryEditor(store: store, session: session)
             }
@@ -112,7 +116,7 @@ struct SchedulerSettingsView: View {
             ZStack(alignment: .topLeading) {
                 Color.clear.contentShape(Rectangle())
                     .onContinuousHover { phase in
-                        guard !store.locked, !store.project.playlists.isEmpty, !isResizing, !isMoving else { hoveredSlot = nil; return }
+                        guard !store.locked, !store.project.playlists.isEmpty, !isResizing, !isMoving, !isSelectingRange else { hoveredSlot = nil; return }
                         switch phase {
                         case .active(let point):
                             let slot = CalendarHoverSlot(day: day, lane: point.x < geometry.size.width / 2 ? .video : .audio,
@@ -122,14 +126,31 @@ struct SchedulerSettingsView: View {
                             if hoveredSlot?.day == day { hoveredSlot = nil }
                         }
                     }
-                    .gesture(SpatialTapGesture(count: 2).onEnded { tap in
+                    .gesture(DragGesture(minimumDistance: 4)
+                        .updating($isSelectingRange) { _, active, _ in active = true }
+                        .onChanged { value in
+                            guard !store.locked, !store.project.playlists.isEmpty else { rangePreview = nil; return }
+                            hoveredSlot = nil
+                            rangePreview = CalendarRangePreview(day: day,
+                                lane: value.startLocation.x < geometry.size.width / 2 ? .video : .audio,
+                                range: selectedRange(from: value.startLocation.y, through: value.location.y))
+                        }
+                        .onEnded { value in
+                            defer { rangePreview = nil }
+                            guard !store.locked, !store.project.playlists.isEmpty else { return }
+                            let range = selectedRange(from: value.startLocation.y, through: value.location.y)
+                            guard let interval = range.interval(on: day, calendar: calendar) else { return }
+                            let lane: MediaLane = value.startLocation.x < geometry.size.width / 2 ? .video : .audio
+                            create(at: interval.start, lane: lane, end: interval.end)
+                        }, including: store.locked ? .none : .all)
+                    .simultaneousGesture(SpatialTapGesture(count: 2).onEnded { tap in
                         guard !store.locked else { return }
                         let minutes = min(1425, max(0, Int(tap.location.y / hourHeight * 4) * 15))
                         guard let start = calendar.date(byAdding: .minute, value: minutes, to: day) else { return }
                         let lane: MediaLane = tap.location.x < geometry.size.width / 2 ? .video : .audio
                         create(at: start, lane: lane)
                     })
-                if let slot = hoveredSlot, slot.day == day, !store.locked, !isResizing, !isMoving {
+                if let slot = hoveredSlot, slot.day == day, !store.locked, !isResizing, !isMoving, !isSelectingRange {
                     let tint: Color = slot.lane == .video ? .blue : .orange
                     HStack(spacing: 2) {
                         Text(String(format: "%02d:%02d", slot.minutes / 60, slot.minutes % 60)).monospacedDigit()
@@ -153,6 +174,25 @@ struct SchedulerSettingsView: View {
                 Rectangle().fill(.quaternary).frame(width: 1).offset(x: geometry.size.width / 2).allowsHitTesting(false)
                 ForEach(occurrences(on: day)) { occurrence in
                     eventBlock(occurrence, day: day, width: geometry.size.width)
+                }
+                if let selection = rangePreview, selection.day == day, !store.locked {
+                    let tint: Color = selection.lane == .video ? .blue : .orange
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(selection.range.timeLabel).font(.system(size: 9)).monospacedDigit()
+                            .lineLimit(1).minimumScaleFactor(0.65)
+                        if selection.range.endMinute - selection.range.startMinute >= 45 {
+                            Text("新しい予定").font(.caption2).fontWeight(.medium)
+                        }
+                    }.padding(3)
+                        .frame(width: max(20, geometry.size.width / 2 - 4),
+                               height: CGFloat(selection.range.endMinute - selection.range.startMinute) / 60 * hourHeight,
+                               alignment: .topLeading)
+                        .foregroundStyle(tint)
+                        .background(tint.opacity(0.22), in: RoundedRectangle(cornerRadius: 4))
+                        .overlay { RoundedRectangle(cornerRadius: 4).strokeBorder(tint, style: StrokeStyle(lineWidth: 1.5, dash: [4, 2])) }
+                        .offset(x: selection.lane == .video ? 2 : geometry.size.width / 2 + 2,
+                                y: CGFloat(selection.range.startMinute) / 60 * hourHeight)
+                        .allowsHitTesting(false).accessibilityHidden(true)
                 }
                 TimelineView(.periodic(from: .now, by: 60)) { context in
                     if calendar.isDate(context.date, inSameDayAs: day) {
@@ -315,13 +355,23 @@ struct SchedulerSettingsView: View {
     private func isRepeating(_ entry: CalendarEntry) -> Bool {
         entry.repetition != .once || entry.parentSeriesID != nil
     }
-    private func create(at date: Date, lane: MediaLane? = nil) {
+    private func selectedRange(from startY: CGFloat, through endY: CGFloat) -> CalendarSelectionRange {
+        CalendarSelectionRange(anchorMinute: Int((startY / hourHeight * 60).rounded(.down)),
+                               currentMinute: Int((endY / hourHeight * 60).rounded()))
+    }
+    private func create(at date: Date, lane: MediaLane? = nil, end: Date? = nil) {
         guard !store.locked,
               let playlist = store.project.playlists.first(where: { $0.lane == lane }) ?? store.project.playlists.first else { return }
         let start = lane == nil ? calendar.date(bySettingHour: calendar.component(.hour, from: date), minute: 0, second: 0, of: anchor) ?? anchor : date
-        let entry = CalendarEntry(playlistID: playlist.id, start: start, end: start.addingTimeInterval(3600))
+        let entry = CalendarEntry(playlistID: playlist.id, start: start, end: end ?? start.addingTimeInterval(3600))
         editing = CalendarEditSession(entry: entry, sourceID: nil, occurrenceStart: start)
     }
+}
+
+private struct CalendarRangePreview {
+    var day: Date
+    var lane: MediaLane
+    var range: CalendarSelectionRange
 }
 
 private struct CalendarHoverSlot: Equatable {
