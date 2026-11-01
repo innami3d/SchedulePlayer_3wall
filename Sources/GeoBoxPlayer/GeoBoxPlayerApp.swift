@@ -6,10 +6,11 @@ struct GeoBoxPlayerApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var store = PlayerStore()
     var body: some Scene {
-        WindowGroup("GeoBox Player") {
+        Window("GeoBox Player", id: "workspace") {
             WorkspaceView(store: store, engine: store.engine, library: store.library)
                 .frame(minWidth: 1000, minHeight: 700)
                 .onAppear { delegate.store = store }
+                .background(ControlWindowReader { window in delegate.attachControlWindow(window, store: store) }.allowsHitTesting(false))
         }
         .windowStyle(.titleBar)
         .commands {
@@ -41,6 +42,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         didSet { if let pendingURL, let store { self.pendingURL = nil; store.openProject(at: pendingURL) } }
     }
     private var pendingURL: URL?
+    private var terminationInProgress = false
+    private let controlWindow = ControlWindowCoordinator { NSApp.terminate(nil) }
+    func attachControlWindow(_ window: NSWindow, store: PlayerStore) {
+        self.store = store
+        controlWindow.attach(window, engine: store.engine)
+    }
+    func applicationDidHide(_ notification: Notification) {
+        if store?.engine.hasVideoOutput == true { _ = store?.engine.ensureControlWindowVisible() }
+    }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if store?.engine.hasVideoOutput == true { _ = store?.engine.ensureControlWindowVisible() }
+        return true
+    }
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
            let icon = NSImage(contentsOf: url) {
@@ -57,11 +71,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let store else { return .terminateNow }
+        if terminationInProgress { return .terminateLater }
         if !store.confirmDiscard() { return .terminateCancel }
         if store.engine.outputIsActive {
+            terminationInProgress = true
             Task { @MainActor in await store.engine.shutdown(); sender.reply(toApplicationShouldTerminate: true) }
             return .terminateLater
         }
-        store.engine.stopImmediately(); return .terminateNow
+        store.engine.controlWindowDidClose(); return .terminateNow
     }
 }

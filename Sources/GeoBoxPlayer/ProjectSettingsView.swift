@@ -13,10 +13,10 @@ struct ProjectSettingsView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("プロジェクト").font(.caption).foregroundStyle(.secondary)
-                    Text("出力・稼働時間").font(.title2).fontWeight(.semibold)
+                    Text("出力設定").font(.title2).fontWeight(.semibold)
                 }
                 Spacer()
-                Button("出力機器を再取得", systemImage: "arrow.clockwise") { devices.refresh() }
+                Button("出力機器を再取得", systemImage: "arrow.clockwise") { devices.refresh() }.controlHover()
             }
             Form {
                 Section("プロジェクト") {
@@ -34,7 +34,7 @@ struct ProjectSettingsView: View {
                             Text("\(store.project.displayName ?? "前回のディスプレイ")（未接続・自動再接続待ち）").tag(Optional(UInt32.max))
                         }
                         ForEach(devices.displays) { display in Text(display.name).tag(Optional(display.id)) }
-                    }
+                    }.fieldHover()
                     if rates.isEmpty {
                         Text("接続先に対応する4Kモードがありません。4K対応の出力先を選択してください。")
                             .foregroundStyle(.orange).font(.caption)
@@ -44,11 +44,10 @@ struct ProjectSettingsView: View {
                                 Text("\(store.project.refreshRate.formatted()) Hz（現在未対応）").tag(store.project.refreshRate)
                             }
                             ForEach(rates, id: \.self) { rate in Text("\(rate.formatted()) Hz").tag(rate) }
-                        }
+                        }.fieldHover()
                     }
-                    Text("出力開始時に4K信号へ切り替え、終了時に元の画面設定へ戻します。素材のfpsは変更しません。")
+                    Text("出力先を設定すると4K信号へ切り替え、解除またはアプリ終了時に元の画面設定へ戻します。再生のない時間は黒画面を送出します。素材のfpsは変更しません。")
                         .font(.caption).foregroundStyle(.secondary)
-                    OutputScheduleFields(store: store, lane: .video)
                 }
                 Section("音声出力") {
                     Picker("音声出力先", selection: Binding(get: { store.project.audioDeviceUID }, set: store.selectAudioDevice)) {
@@ -57,41 +56,14 @@ struct ProjectSettingsView: View {
                             Text("\(store.project.audioDeviceName ?? "前回の音声機器")（未接続・自動再接続待ち）").tag(Optional(uid))
                         }
                         ForEach(devices.audio) { device in Text(device.name).tag(Optional(device.id)) }
-                    }
-                    OutputScheduleFields(store: store, lane: .audio)
+                    }.fieldHover()
                 }
             }.formStyle(.grouped).disabled(store.locked)
-            Text("時刻は日付なしで毎日適用。終了時刻に全体のフェードアウトを開始します。")
+            Text("再生する日時と開始・終了フェードは「スケジューラ設定」で指定します。")
                 .font(.caption).foregroundStyle(.secondary)
         }.padding(24)
     }
     private var rates: [Double] { store.selectedDisplay?.rates ?? [] }
-}
-
-struct OutputScheduleFields: View {
-    @ObservedObject var store: PlayerStore
-    var lane: MediaLane
-    private var schedule: OutputSchedule { store.project.schedule(for: lane) }
-    private func binding<T>(_ path: WritableKeyPath<OutputSchedule, T>) -> Binding<T> {
-        Binding(get: { schedule[keyPath: path] }, set: { value in
-            store.change { if lane == .video { $0.video[keyPath: path] = value } else { $0.audio[keyPath: path] = value } }
-        })
-    }
-    var body: some View {
-        Picker("デフォルト再生プレイリスト", selection: binding(\.initialPlaylistID)) {
-            Text("指定なし").tag(nil as UUID?)
-            ForEach(store.project.playlists.filter { $0.lane == lane }) { p in Text(p.name).tag(Optional(p.id)) }
-            if let id = schedule.initialPlaylistID, store.project.playlist(id) == nil { Text("指定先は削除済み").tag(Optional(id)) }
-        }
-        HStack {
-            TimeField(title: "開始時刻", value: binding(\.start))
-            TimeField(title: "終了時刻（OUT開始）", value: binding(\.end))
-        }
-        HStack {
-            NumberField(title: "開始フェード（秒）", value: binding(\.fades.fadeIn), range: 0...max(0, store.project.defaults.fadeMax))
-            NumberField(title: "終了フェード（秒）", value: binding(\.fades.fadeOut), range: 0...max(0, store.project.defaults.fadeMax))
-        }
-    }
 }
 
 struct TimeField: View {
@@ -103,7 +75,7 @@ struct TimeField: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title).font(.caption).foregroundStyle(.secondary)
-            TextField("HH:mm:ss", text: $draft).monospacedDigit().textFieldStyle(.roundedBorder)
+            TextField("HH:mm:ss", text: $draft).monospacedDigit().textFieldStyle(.roundedBorder).fieldHover()
                 .focused($focused).onSubmit(commit)
                 .onAppear { draft = value.text }
                 .onChange(of: focused) { _, now in if !now { commit() } }
@@ -127,7 +99,7 @@ struct NumberField: View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title).font(.caption).foregroundStyle(.secondary)
             TextField(title, value: Binding(get: { value }, set: { if $0.isFinite { value = min(range.upperBound, max(range.lowerBound, $0)) } }), format: .number.precision(.fractionLength(0...maximumFractionDigits)))
-                .textFieldStyle(.roundedBorder).monospacedDigit()
+                .textFieldStyle(.roundedBorder).monospacedDigit().fieldHover()
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 }

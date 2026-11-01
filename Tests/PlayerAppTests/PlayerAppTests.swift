@@ -327,7 +327,8 @@ extension PlayerAppTests {
         playlist.playbackSettings.videoTrackFades = .init(fadeIn: 1, fadeOut: 2)
         playlist.tracks = [.init(path: url.path, kind: .audio)]
         playlist.start = store.project.audio.start
-        store.project.playlists = [playlist]; store.project.audio.initialPlaylistID = playlist.id
+        store.project.playlists = [playlist]
+        store.project.calendarEntries = [CalendarEntry(playlistID: playlist.id, start: date.addingTimeInterval(-60), end: date.addingTimeInterval(60), fades: .init(fadeIn: 0, fadeOut: 0))]
         store.engine.resetSchedule(reconcile: true)
         store.engine.tick()
         XCTAssertFalse(store.engine.audioGate.active, "Wait for metadata before starting recovery")
@@ -371,7 +372,7 @@ extension PlayerAppTests {
         var playlist = Playlist(name: "Preview", lane: .video)
         playlist.fades = .init(fadeIn: 0, fadeOut: 0)
         playlist.tracks = [.init(path: url.path, kind: .image, imageDuration: 120)]
-        store.project.playlists = [playlist]; store.project.video.initialPlaylistID = playlist.id
+        store.project.playlists = [playlist]; store.selectedPlaylistID = playlist.id
         store.prepareMedia()
         for _ in 0..<100 {
             if store.library.prepared(url) != nil { break }
@@ -401,7 +402,7 @@ extension PlayerAppTests {
         let date = Date()
         store.project.video.start = .at(date.addingTimeInterval(-5))
         store.project.video.end = .at(date.addingTimeInterval(60))
-        store.project.playlists[0].start = store.project.video.start
+        store.project.calendarEntries = [CalendarEntry(playlistID: playlist.id, start: date.addingTimeInterval(-5), end: date.addingTimeInterval(60), fades: .init(fadeIn: 0, fadeOut: 0))]
         store.project.audio.end = store.project.audio.start
         engine.resetSchedule(reconcile: true); engine.tick()
         XCTAssertEqual(engine.videoState.playlistID, playlist.id)
@@ -464,5 +465,279 @@ extension PlayerAppTests {
         XCTAssertTrue(store.save())
         store.newProject()
         XCTAssertEqual(store.project.name, "新規プロジェクト")
+    }
+}
+
+extension PlayerAppTests {
+    @MainActor func testCalendarDropUndoLockDeleteAndSave() throws {
+        let store = PlayerStore(restoreLastProject: false)
+        store.createPlaylist(.video)
+        let playlist = try XCTUnwrap(store.selectedPlaylist)
+        XCTAssertNil(store.project.video.initialPlaylistID)
+        let start = Date()
+        let id = try XCTUnwrap(store.addCalendarEntry(playlistID: playlist.id, start: start))
+        XCTAssertEqual(store.project.calendarEntries?.first?.end, start.addingTimeInterval(3600))
+        store.undo(); XCTAssertTrue(store.project.calendarEntries?.isEmpty == true)
+        store.redo(); XCTAssertEqual(store.project.calendarEntries?.first?.id, id)
+        store.locked = true
+        XCTAssertNil(store.addCalendarEntry(playlistID: playlist.id, start: start))
+        store.locked = false
+        store.selectScheduler(); XCTAssertTrue(store.showingScheduler)
+        store.selectPlaylist(playlist.id); XCTAssertFalse(store.showingScheduler)
+        store.deleteSelection()
+        XCTAssertTrue(store.project.calendarEntries?.isEmpty == true)
+        try store.project.validate()
+        store.undo()
+        XCTAssertEqual(store.project.calendarEntries?.first?.playlistID, playlist.id)
+    }
+}
+
+extension PlayerAppTests {
+    @MainActor func testRecurringScopeChangeIsAtomicUndoableAndLocked() throws {
+        let store = PlayerStore(restoreLastProject: false)
+        store.createPlaylist(.video)
+        let id = try XCTUnwrap(store.selectedPlaylistID)
+        let start = Calendar.current.startOfDay(for: Date()).addingTimeInterval(10 * 3600)
+        let series = CalendarEntry(playlistID: id, start: start, end: start.addingTimeInterval(3600), repetition: .daily)
+        store.change { $0.calendarEntries = [series] }
+        let before = store.project
+        var draft = series
+        draft.start = Calendar.current.date(byAdding: .day, value: 3, to: start)!
+        draft.end = draft.start.addingTimeInterval(7200)
+        store.editCalendarEntry(id: series.id, occurrenceStart: draft.start, replacement: draft, scope: .following)
+        let after = store.project
+        XCTAssertEqual(after.calendarEntries?.count, 2)
+        store.undo(); XCTAssertEqual(store.project, before)
+        store.redo(); XCTAssertEqual(store.project, after)
+        store.locked = true
+        store.editCalendarEntry(id: series.id, occurrenceStart: start, replacement: nil, scope: .all)
+        XCTAssertEqual(store.project, after)
+        store.locked = false
+        store.selectPlaylist(id); store.deleteSelection()
+        XCTAssertTrue(store.project.calendarEntries?.isEmpty == true)
+        try store.project.validate()
+    }
+}
+
+extension PlayerAppTests {
+    @MainActor func testScheduledVideoSoundWithoutAudioScheduleAndSuppressionRecovery() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let silentURL = directory.appendingPathComponent("silent.mov")
+        let soundURL = directory.appendingPathComponent("sound.wav")
+        let movieURL = directory.appendingPathComponent("with-sound.mov")
+        let format = AVAudioFormat(standardFormatWithSampleRate: 8000, channels: 1)!
+        let samples = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8000 * 4)!
+        samples.frameLength = samples.frameCapacity
+        for index in 0..<Int(samples.frameLength) {
+            samples.floatChannelData![0][index] = Float(sin(Double(index) * 2 * .pi * 440 / 8000) * 0.1)
+        }
+        do { let file = try AVAudioFile(forWriting: soundURL, settings: format.settings); try file.write(from: samples) }
+        let writer = try AVAssetWriter(outputURL: silentURL, fileType: .mov)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: 16, AVVideoHeightKey: 16])
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32ARGB,
+            kCVPixelBufferWidthKey as String: 16, kCVPixelBufferHeightKey as String: 16
+        ])
+        writer.add(input); XCTAssertTrue(writer.startWriting()); writer.startSession(atSourceTime: .zero)
+        var pixel: CVPixelBuffer?
+        XCTAssertEqual(CVPixelBufferCreate(nil, 16, 16, kCVPixelFormatType_32ARGB, nil, &pixel), kCVReturnSuccess)
+        let bitmap = try XCTUnwrap(pixel)
+        CVPixelBufferLockBaseAddress(bitmap, [])
+        memset(CVPixelBufferGetBaseAddress(bitmap), 127, CVPixelBufferGetDataSize(bitmap))
+        CVPixelBufferUnlockBaseAddress(bitmap, [])
+        for frame in 0..<120 {
+            var attempts = 0
+            while !input.isReadyForMoreMediaData, attempts < 200 { attempts += 1; try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertTrue(adaptor.append(bitmap, withPresentationTime: CMTime(value: Int64(frame), timescale: 30)))
+        }
+        input.markAsFinished(); await writer.finishWriting()
+        XCTAssertEqual(writer.status, .completed)
+        let composition = AVMutableComposition()
+        let videoSource = AVURLAsset(url: silentURL), audioSource = AVURLAsset(url: soundURL)
+        let videoTracks = try await videoSource.loadTracks(withMediaType: .video)
+        let audioTracks = try await audioSource.loadTracks(withMediaType: .audio)
+        let duration = try await videoSource.load(.duration)
+        let range = CMTimeRange(start: .zero, duration: duration)
+        try composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)!.insertTimeRange(range, of: XCTUnwrap(videoTracks.first), at: .zero)
+        try composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)!.insertTimeRange(range, of: XCTUnwrap(audioTracks.first), at: .zero)
+        let exporter = try XCTUnwrap(AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality))
+        exporter.outputURL = movieURL; exporter.outputFileType = .mov
+        await exporter.export()
+        XCTAssertEqual(exporter.status, .completed, exporter.error?.localizedDescription ?? "")
+
+        let store = PlayerStore(restoreLastProject: false), now = Date()
+        let engine = store.engine
+        defer { engine.stopImmediately() }
+        var video = Playlist(name: "動画内音声", lane: .video)
+        video.tracks = [.init(path: movieURL.path, kind: .video, volume: 0.4)]
+        var audio = Playlist(name: "独立音声", lane: .audio)
+        audio.tracks = [.init(path: soundURL.path, kind: .audio)]
+        store.project.playlists = [video, audio]
+        let entry = CalendarEntry(playlistID: video.id, start: now.addingTimeInterval(-1), end: now.addingTimeInterval(120), fades: .init(fadeIn: 0, fadeOut: 0))
+        store.project.calendarEntries = [entry]
+        store.prepareMedia()
+        for _ in 0..<200 {
+            if store.library.prepared(movieURL) != nil, store.library.prepared(soundURL) != nil { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(try XCTUnwrap(store.library.prepared(movieURL)).hasAudio)
+        engine.resetSchedule(reconcile: true)
+        for _ in 0..<200 {
+            engine.tick()
+            if engine.videoMedia.ready { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        engine.tick()
+        XCTAssertFalse(engine.audioGate.active, "No independent audio schedule is needed for video sound")
+        XCTAssertFalse(engine.audioState.active)
+        XCTAssertEqual(engine.videoMedia.player.volume, 0.4, accuracy: 0.001)
+        XCTAssertFalse(engine.videoMedia.player.isMuted)
+        XCTAssertTrue(engine.suppressionReasons.isEmpty)
+        XCTAssertTrue(engine.status.contains("動画内音声（再生中）"))
+        store.change { $0.playlists[0].muted = true }; engine.tick()
+        XCTAssertEqual(engine.videoMedia.player.volume, 0)
+        XCTAssertTrue(engine.status.contains("動画内音声（ミュート中）"))
+        store.change { $0.playlists[0].muted = false }
+
+        store.change { $0.calendarEntries?.append(.init(playlistID: audio.id, start: now.addingTimeInterval(-1), end: now.addingTimeInterval(120), fades: .init(fadeIn: 0, fadeOut: 0))) }
+        engine.resetSchedule(reconcile: true)
+        for _ in 0..<200 {
+            engine.tick()
+            if engine.audioMedia.ready && engine.videoMedia.ready { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        engine.tick()
+        XCTAssertEqual(engine.videoMedia.player.volume, 0, "The independent audio playlist still takes priority")
+        XCTAssertGreaterThan(engine.audioMedia.player.volume, 0)
+        XCTAssertTrue(engine.status.contains("音声プレイリスト"))
+        store.change { $0.calendarEntries?.removeAll { $0.playlistID == audio.id } }
+        engine.resetSchedule(reconcile: true)
+        for _ in 0..<200 {
+            engine.tick()
+            if engine.videoMedia.ready && !engine.audioGate.active { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        engine.tick()
+        XCTAssertEqual(engine.videoMedia.player.volume, 0.4, accuracy: 0.001)
+        store.project.audioDeviceUID = "missing-" + UUID().uuidString
+        engine.reconnectDevices(); engine.tick()
+        XCTAssertTrue(engine.audioDisconnected)
+        XCTAssertTrue(engine.videoMedia.player.isMuted)
+        store.project.audioDeviceUID = nil
+        engine.reconnectDevices(); engine.tick()
+        XCTAssertFalse(engine.audioDisconnected)
+        XCTAssertFalse(engine.videoMedia.player.isMuted)
+        XCTAssertEqual(engine.videoMedia.player.volume, 0.4, accuracy: 0.001)
+        // Video sound follows the video's scheduled fade even while the audio lane is stopped.
+        store.change { $0.calendarEntries?[0].fades.fadeIn = 10 }
+        engine.resetSchedule(reconcile: true)
+        for _ in 0..<200 {
+            engine.tick()
+            if engine.videoMedia.ready { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        engine.tick()
+        XCTAssertFalse(engine.audioGate.active)
+        XCTAssertEqual(engine.videoMedia.player.volume, Float(engine.videoOpacity * 0.4), accuracy: 0.001)
+        XCTAssertGreaterThan(engine.videoMedia.player.volume, 0)
+        engine.tick(date: entry.end.addingTimeInterval(1))
+        XCTAssertEqual(engine.videoMedia.player.volume, 0)
+    }
+}
+
+extension PlayerAppTests {
+    @MainActor func testVideoSurfaceAlwaysBlacksOutWhenNoMediaIsVisible() throws {
+        let surface = VideoSurface(frame: NSRect(x: 0, y: 0, width: 160, height: 90))
+        let player = AVPlayer()
+        surface.update(player: player, image: nil, opacity: 1, color: .red, visible: true)
+        XCTAssertEqual(NSColor(cgColor: try XCTUnwrap(surface.layer?.backgroundColor)), .red)
+        // Waiting/stopped output must not show the last playlist's custom fade color.
+        surface.update(player: player, image: nil, opacity: 1, color: .red, visible: false)
+        let color = try XCTUnwrap(NSColor(cgColor: try XCTUnwrap(surface.layer?.backgroundColor))?.usingColorSpace(.sRGB))
+        XCTAssertEqual(color.redComponent, 0); XCTAssertEqual(color.greenComponent, 0); XCTAssertEqual(color.blueComponent, 0)
+        XCTAssertEqual(surface.layer?.sublayers?.first?.opacity, 0)
+    }
+    @MainActor func testCalendarGapAndScheduledEndReturnToBlackPreview() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("still.png")
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 8, pixelsHigh: 8, bitsPerSample: 8,
+                                      samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                      colorSpaceName: .calibratedRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        try bitmap.representation(using: .png, properties: [:])!.write(to: url)
+        let store = PlayerStore(restoreLastProject: false)
+        let engine = store.engine
+        defer { engine.stopImmediately() }
+        engine.tick()
+        XCTAssertFalse(engine.videoVisible)
+        XCTAssertEqual(engine.videoOpacity, 0)
+        XCTAssertTrue(engine.status.contains("黒画面で待機"))
+        var playlist = Playlist(name: "White fade", lane: .video)
+        playlist.playbackSettings.fadeColorHex = "#FFFFFF"
+        playlist.tracks = [.init(path: url.path, kind: .image, imageDuration: 120)]
+        let now = Date()
+        let entry = CalendarEntry(playlistID: playlist.id, start: now.addingTimeInterval(-5), end: now.addingTimeInterval(30), fades: .init(fadeIn: 0, fadeOut: 2))
+        store.project.playlists = [playlist]; store.project.calendarEntries = [entry]
+        store.prepareMedia()
+        for _ in 0..<100 {
+            if store.library.prepared(url) != nil { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        engine.resetSchedule(reconcile: true); engine.tick()
+        XCTAssertTrue(engine.videoVisible)
+        XCTAssertEqual(engine.videoOpacity, 1)
+        let clock = ProcessInfo.processInfo.systemUptime
+        engine.tick(date: entry.end.addingTimeInterval(0.1), now: clock)
+        XCTAssertTrue(engine.videoVisible, "Keep the image visible while its scheduled fade-out completes")
+        engine.tick(date: entry.end.addingTimeInterval(2.2), now: clock + 2.1)
+        XCTAssertFalse(engine.videoVisible)
+        XCTAssertEqual(engine.videoOpacity, 0)
+        XCTAssertTrue(engine.status.contains("黒画面で待機"))
+    }
+}
+
+extension PlayerAppTests {
+    @MainActor func testControlCloseWaitsForTerminationAndForcedCloseStopsAllPlayback() {
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: -10000, y: -10000, width: 200, height: 100), styleMask: [.titled, .closable], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+        let store = PlayerStore(restoreLastProject: false)
+        let engine = store.engine
+        var requested = 0
+        let coordinator = ControlWindowCoordinator { requested += 1 }
+        coordinator.attach(window, engine: engine)
+        engine.startProject()
+        XCTAssertTrue(engine.outputIsActive)
+        XCTAssertFalse(coordinator.windowShouldClose(window), "The control window must stay until termination is approved")
+        XCTAssertEqual(requested, 1)
+        XCTAssertTrue(engine.outputIsActive, "Cancelling the termination request must leave playback intact")
+        coordinator.windowWillClose(Notification(name: NSWindow.willCloseNotification, object: window))
+        XCTAssertFalse(engine.outputIsActive)
+        XCTAssertFalse(engine.hasVideoOutput)
+        XCTAssertNil(engine.videoMedia.player.currentItem)
+        XCTAssertNil(engine.audioMedia.player.currentItem)
+        // Neither a queued timer tick nor a new schedule/manual command may restart output.
+        engine.resetSchedule(reconcile: true)
+        engine.startClock()
+        engine.startProject()
+        engine.tick(date: Date().addingTimeInterval(60))
+        XCTAssertFalse(engine.outputIsActive)
+        XCTAssertFalse(engine.hasVideoOutput)
+        window.delegate = nil
+        window.close()
+    }
+    @MainActor func testExternalOutputCannotOpenWithoutAControlWindow() throws {
+        let store = PlayerStore(restoreLastProject: false)
+        guard let display = store.devices.displays.first else { throw XCTSkip("No screen available") }
+        store.project.displayID = display.id; store.project.displayUUID = display.uuid
+        let engine = store.engine
+        defer { engine.stopImmediately() }
+        engine.reconnectDevices()
+        XCTAssertFalse(engine.hasVideoOutput)
+        XCTAssertTrue(engine.videoDisconnected)
+        XCTAssertTrue(store.message.contains("操作ウィンドウが開いていない"))
     }
 }

@@ -12,6 +12,7 @@ final class PlayerStore: ObservableObject {
     @Published var selectedPlaylistID: UUID?
     @Published var selectedTrackID: UUID?
     @Published var showingProject = true
+    @Published var showingScheduler = false
     @Published var message = "プロジェクト設定で出力先を選択してください。"
     @Published var error: String?
     @Published private(set) var undoStack: [PlayerProject] = []
@@ -106,10 +107,10 @@ final class PlayerStore: ObservableObject {
     }
     func selectProject() {
         selectedPlaylistID = nil; selectedTrackID = nil; selection = .playlist
-        showingProject = true
+        showingScheduler = false; showingProject = true
     }
     func selectPlaylist(_ id: UUID) {
-        selectedPlaylistID = id; selectedTrackID = nil; selection = .playlist; showingProject = false
+        selectedPlaylistID = id; selectedTrackID = nil; selection = .playlist; showingProject = false; showingScheduler = false
     }
     func selectTrack(_ id: UUID) { selectedTrackID = id; selection = .track }
     func createPlaylist(_ lane: MediaLane) {
@@ -117,19 +118,21 @@ final class PlayerStore: ObservableObject {
         let p = Playlist(name: "新規\(lane.title)プレイリスト", lane: lane, order: project.nextOrder, defaults: project.defaults)
         change { project in
             project.playlists.append(p)
-            if lane == .video && project.video.initialPlaylistID == nil { project.video.initialPlaylistID = p.id }
-            if lane == .audio && project.audio.initialPlaylistID == nil { project.audio.initialPlaylistID = p.id }
+
         }
         selectPlaylist(p.id)
     }
-    func setPlaylistTime(_ value: TimeOfDay) {
-        guard let id = selectedPlaylistID else { return }
-        change { project in
-            let order = project.nextOrder
-            if let i = project.playlists.firstIndex(where: { $0.id == id }) {
-                project.playlists[i].start = value; project.playlists[i].scheduleOrder = order
-            }
-        }
+    func selectScheduler() {
+        selectedPlaylistID = nil; selectedTrackID = nil; showingProject = false; showingScheduler = true
+    }
+    @discardableResult func addCalendarEntry(playlistID: UUID, start: Date) -> UUID? {
+        guard !locked, project.playlist(playlistID) != nil else { return nil }
+        let entry = CalendarEntry(playlistID: playlistID, start: start, end: start.addingTimeInterval(3600))
+        change { if $0.calendarEntries == nil { $0.calendarEntries = [] }; $0.calendarEntries?.append(entry) }
+        return entry.id
+    }
+    func editCalendarEntry(id: UUID, occurrenceStart: Date, replacement: CalendarEntry?, scope: CalendarEditScope) {
+        change { $0.editCalendarEntry(id: id, occurrenceStart: occurrenceStart, replacement: replacement, scope: scope) }
     }
     func addFiles(_ urls: [URL], at insertion: Int? = nil) {
         guard !locked, let p = selectedPlaylist else { return }
@@ -168,7 +171,11 @@ final class PlayerStore: ObservableObject {
                 if let i = project.playlists.firstIndex(where: { $0.id == p }) { project.playlists[i].tracks.removeAll { $0.id == t } }
             }; selectedTrackID = nil
         } else if let p = selectedPlaylistID {
-            change { $0.playlists.removeAll { $0.id == p } }; selectedPlaylistID = nil; showingProject = true
+            change { project in
+                let removed = Set((project.calendarEntries ?? []).filter { $0.playlistID == p }.map(\.id))
+                project.playlists.removeAll { $0.id == p }
+                project.calendarEntries?.removeAll { $0.playlistID == p || $0.parentSeriesID.map { removed.contains($0) } == true }
+            }; selectedPlaylistID = nil; showingProject = true
         }
         prepareMedia()
     }
@@ -218,9 +225,9 @@ final class PlayerStore: ObservableObject {
     func prepareMedia() { library.prepare(project: project, directory: directory) }
     func newProject() {
         guard !locked, confirmDiscard() else { return }
-        engine.stopImmediately(); project = PlayerProject(); fileURL = nil; isDirty = false
+        engine.stopImmediately(releaseOutput: false); project = PlayerProject(); fileURL = nil; isDirty = false
         undoStack.removeAll(); redoStack.removeAll(); selectedPlaylistID = nil; selectedTrackID = nil
-        showingProject = true; prepareMedia(); engine.resetSchedule()
+        showingScheduler = false; showingProject = true; prepareMedia(); engine.resetSchedule()
         if remembersProject { UserDefaults.standard.removeObject(forKey: recentProjectKey) }
     }
     func openProject() {
@@ -237,9 +244,9 @@ final class PlayerStore: ObservableObject {
         do {
             var next = try PlayerProject.decode(Data(contentsOf: url))
             next.name = url.deletingPathExtension().lastPathComponent
-            engine.stopImmediately(); project = next; fileURL = url; isDirty = false
+            engine.stopImmediately(releaseOutput: false); project = next; fileURL = url; isDirty = false
             undoStack.removeAll(); redoStack.removeAll(); selectedPlaylistID = nil; selectedTrackID = nil
-            showingProject = true; prepareMedia(); engine.resetSchedule(reconcile: true)
+            showingScheduler = false; showingProject = true; prepareMedia(); engine.resetSchedule(reconcile: true)
             if remembersProject { UserDefaults.standard.set(url.path, forKey: recentProjectKey) }
         } catch { self.error = error.localizedDescription }
     }

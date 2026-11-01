@@ -14,6 +14,7 @@ public enum DailyScheduler {
     /// A pause longer than a day should be reconciled by the caller rather than replaying old events.
     public static func events(project: PlayerProject, after previous: Date, through now: Date,
                               calendar: Calendar = .current) -> [ScheduledEvent] {
+        if project.calendarEntries != nil { return CalendarScheduler.events(project: project, after: previous, through: now, calendar: calendar) }
         guard now > previous, now.timeIntervalSince(previous) <= 86_400 else { return [] }
         let first = calendar.startOfDay(for: previous)
         let last = calendar.startOfDay(for: now)
@@ -72,6 +73,7 @@ extension DailyScheduler {
     /// A playlist's own start time can start output before the default output start.
     public static func playback(project: PlayerProject, lane: MediaLane, at date: Date,
                                 now: TimeInterval, calendar: Calendar = .current) -> ScheduledPlayback? {
+        if project.calendarEntries != nil { return CalendarScheduler.playback(project: project, lane: lane, at: date, now: now, calendar: calendar) }
         let schedule = project.schedule(for: lane)
         var day = calendar.startOfDay(for: date)
         guard var stop = schedule.end.date(on: day, calendar: calendar) else { return nil }
