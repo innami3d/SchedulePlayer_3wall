@@ -225,7 +225,7 @@ final class PlayerStore: ObservableObject {
     func prepareMedia() { library.prepare(project: project, directory: directory) }
     func newProject() {
         guard !locked, confirmDiscard() else { return }
-        engine.stopImmediately(); project = PlayerProject(); fileURL = nil; isDirty = false
+        engine.stopImmediately(releaseOutput: false); project = PlayerProject(); fileURL = nil; isDirty = false
         undoStack.removeAll(); redoStack.removeAll(); selectedPlaylistID = nil; selectedTrackID = nil
         showingScheduler = false; showingProject = true; prepareMedia(); engine.resetSchedule()
         if remembersProject { UserDefaults.standard.removeObject(forKey: recentProjectKey) }
@@ -244,7 +244,7 @@ final class PlayerStore: ObservableObject {
         do {
             var next = try PlayerProject.decode(Data(contentsOf: url))
             next.name = url.deletingPathExtension().lastPathComponent
-            engine.stopImmediately(); project = next; fileURL = url; isDirty = false
+            engine.stopImmediately(releaseOutput: false); project = next; fileURL = url; isDirty = false
             undoStack.removeAll(); redoStack.removeAll(); selectedPlaylistID = nil; selectedTrackID = nil
             showingScheduler = false; showingProject = true; prepareMedia(); engine.resetSchedule(reconcile: true)
             if remembersProject { UserDefaults.standard.set(url.path, forKey: recentProjectKey) }

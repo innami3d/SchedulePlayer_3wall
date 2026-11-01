@@ -50,15 +50,36 @@ final class PlaybackEngine: ObservableObject {
     private var appliedDisplay: UInt32?
     private var appliedRate: Double?
     private var shuttingDown = false
+    private weak var controlWindow: NSWindow?
+    private var controlWindowClosed = false
+    var hasVideoOutput: Bool { output.displayID != nil }
+    func attachControlWindow(_ window: NSWindow) {
+        controlWindow = window; controlWindowClosed = false
+    }
+    @discardableResult func ensureControlWindowVisible() -> Bool {
+        guard !controlWindowClosed, let controlWindow else { return false }
+        if NSApp?.isHidden == true { NSApp.unhide(nil) }
+        if controlWindow.isMiniaturized { controlWindow.deminiaturize(nil) }
+        if !controlWindow.isVisible { controlWindow.makeKeyAndOrderFront(nil) }
+        return controlWindow.isVisible && !controlWindow.isMiniaturized
+    }
+    func controlWindowDidClose() {
+        controlWindowClosed = true; shuttingDown = true
+        timer?.invalidate(); timer = nil
+        stopImmediately(releaseOutput: true)
+        controlWindow = nil
+    }
     private(set) var videoDisconnected = false
     private(set) var audioDisconnected = false
     var videoOpacity: Double = 0
+    var videoVisible: Bool { videoGate.active && videoState.active && videoMedia.ready }
     var videoFadeColorHex: String {
         store?.project.playlist(videoState.playlistID)?.playbackSettings.fadeColorHex ?? "#000000"
     }
     var status: String {
         let previewOnly = videoGate.active && store?.project.displayID == nil && store?.project.displayUUID == nil
-        let videoStatus = previewOnly ? "プレビューのみ（\(videoState.phase.title)）" : (videoDisconnected ? "機器の再接続待ち" : videoState.phase.title)
+        let phase = videoState.active ? (videoMedia.ready ? videoState.phase.title : "読み込み中") : "黒画面で待機"
+        let videoStatus = previewOnly ? "プレビューのみ（\(phase)）" : (videoDisconnected ? "機器の再接続待ち" : phase)
         return "映像：\(videoStatus) ／ 音声：\(audioStatus)"
     }
     private var embeddedVideoHasAudio: Bool {
@@ -91,7 +112,7 @@ final class PlaybackEngine: ObservableObject {
     }
     init(store: PlayerStore) { self.store = store }
     func startClock() {
-        guard timer == nil else { return }
+        guard !controlWindowClosed, timer == nil else { return }
         lastScheduleDate = Date()
         store?.rememberDeviceIdentities()
         if store?.fileURL != nil { recoveryLanes = Set(MediaLane.allCases) }
@@ -101,6 +122,7 @@ final class PlaybackEngine: ObservableObject {
         if let timer { RunLoop.main.add(timer, forMode: .common) }
     }
     func resetSchedule(reconcile: Bool = false) {
+        guard !controlWindowClosed else { return }
         lastScheduleDate = Date(); shuttingDown = false
         recoveryLanes = reconcile ? Set(MediaLane.allCases) : []
         lastRecoveryAttempt = -.infinity
@@ -112,10 +134,10 @@ final class PlaybackEngine: ObservableObject {
             try? await Task.sleep(for: .milliseconds(20))
             tick()
         }
-        timer?.invalidate(); timer = nil; stopImmediately()
+        controlWindowDidClose()
     }
     func play(_ id: UUID) {
-        guard let store, !store.locked, let playlist = store.project.playlist(id) else { return }
+        guard !controlWindowClosed, let store, !store.locked, let playlist = store.project.playlist(id) else { return }
         recoveryLanes.remove(playlist.lane)
         let now = ProcessInfo.processInfo.systemUptime
         if playlist.lane == .video {
@@ -126,7 +148,7 @@ final class PlaybackEngine: ObservableObject {
     }
 
     func playTrack(_ trackID: UUID, in playlistID: UUID) {
-        guard let store, !store.locked,
+        guard !controlWindowClosed, let store, !store.locked,
               let playlist = store.project.playlist(playlistID),
               playlist.tracks.contains(where: { $0.id == trackID }) else { return }
         recoveryLanes.remove(playlist.lane)
@@ -138,7 +160,7 @@ final class PlaybackEngine: ObservableObject {
     }
 
     private func applyTrackRequest(_ lane: MediaLane, now: TimeInterval) {
-        guard let store, let request = trackRequests[lane] else { return }
+        guard !controlWindowClosed, let store, let request = trackRequests[lane] else { return }
         guard !store.locked, let playlist = store.project.playlist(request.playlistID),
               let index = playlist.tracks.firstIndex(where: { $0.id == request.trackID }) else {
             trackRequests[lane] = nil; return
@@ -165,13 +187,13 @@ final class PlaybackEngine: ObservableObject {
     }
 
     func startProject(manual: Bool = true) {
-        guard let store, !manual || !store.locked else { return }
+        guard !controlWindowClosed, let store, !manual || !store.locked else { return }
         let now = ProcessInfo.processInfo.systemUptime
         recoveryLanes.removeAll()
         for lane in MediaLane.allCases { startOutput(lane, now: now) }
     }
     func endProject(manual: Bool = true) {
-        guard let store, !manual || !store.locked else { return }
+        guard !controlWindowClosed, let store, !manual || !store.locked else { return }
         let now = ProcessInfo.processInfo.systemUptime
         recoveryLanes.removeAll()
         videoGate.end(duration: stopFade(.video), now: now)
@@ -179,12 +201,16 @@ final class PlaybackEngine: ObservableObject {
         readyRequests.removeAll()
         trackRequests.removeAll()
     }
-    func stopImmediately() {
+    func stopImmediately(releaseOutput: Bool = true) {
         trackRequests.removeAll()
         recoveryLanes.removeAll()
         videoState.stop(); audioState.stop(); videoGate.stop(); audioGate.stop()
-        videoMedia.stop(); audioMedia.stop(); readyRequests.removeAll(); output.close()
-        store?.devices.restoreModes(); appliedDisplay = nil; appliedRate = nil
+        videoMedia.stop(); audioMedia.stop(); readyRequests.removeAll()
+        if releaseOutput {
+            output.close(); store?.devices.restoreModes(); appliedDisplay = nil; appliedRate = nil
+        } else {
+            output.surface?.update(player: videoMedia.player, image: nil, opacity: 0, color: .black, visible: false)
+        }
         videoDisconnected = false; audioDisconnected = false
         videoMedia.player.isMuted = false; audioMedia.player.isMuted = false
         videoOpacity = 0; endActivity(); objectWillChange.send()
@@ -196,12 +222,15 @@ final class PlaybackEngine: ObservableObject {
             if store.project.displayID != nil || store.project.displayUUID != nil { throw OutputDevices.DeviceError.missingDisplay }
             return // An unconfigured external display still allows the in-app preview.
         }
+        guard ensureControlWindowVisible() else { throw OutputDevices.DeviceError.missingControlWindow }
         if appliedDisplay != id || appliedRate != store.project.refreshRate {
             output.close(); store.devices.restoreModes()
             try store.devices.activate4K(displayID: id, refreshRate: store.project.refreshRate)
             appliedDisplay = id; appliedRate = store.project.refreshRate
         }
         try output.open(displayID: id)
+        // A same-screen output must not cover the controls that can stop it.
+        controlWindow?.orderFront(nil)
     }
     private func openAudio() throws {
         guard let store else { return }
@@ -271,11 +300,12 @@ final class PlaybackEngine: ObservableObject {
         else { audioState.request(p, project: store.project, now: now, usePlaylistFades: store.project.calendarEntries == nil) }
     }
     func tick(date: Date = Date(), now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
-        guard let store else { return }
+        guard !controlWindowClosed, let store else { return }
+        if hasVideoOutput && controlWindow == nil { controlWindowDidClose(); return }
         let project = store.project
         if !shuttingDown && (date.timeIntervalSince(lastScheduleDate) >= 0.2 || date < lastScheduleDate) {
             if date.timeIntervalSince(lastScheduleDate) > 86_400 || date < lastScheduleDate {
-                stopImmediately()
+                stopImmediately(releaseOutput: false)
                 recoveryLanes = Set(MediaLane.allCases)
             } else {
                 for event in DailyScheduler.events(project: project, after: lastScheduleDate, through: date) {
@@ -318,7 +348,6 @@ final class PlaybackEngine: ObservableObject {
         videoGate.tick(now: now); audioGate.tick(now: now)
         if !videoGate.active {
             videoState.stop(); if videoMedia.playlistID != nil { videoMedia.stop() }
-            if output.displayID != nil { output.close(); store.devices.restoreModes(); appliedDisplay = nil; appliedRate = nil }
         }
         if !audioGate.active { audioState.stop(); if audioMedia.playlistID != nil { audioMedia.stop() } }
         videoState.tick(project: project, now: now); audioState.tick(project: project, now: now)
@@ -333,14 +362,14 @@ final class PlaybackEngine: ObservableObject {
         videoMedia.player.volume = Float(permitted ? max(0, min(1, videoAudioGate.envelope.value(at: now) * videoGain * videoVolume)) : 0)
         audioMedia.player.volume = Float(audioGate.active ? max(0, min(1, audioGate.envelope.value(at: now) * audioGain * audioVolume)) : 0)
         output.surface?.update(player: videoMedia.player, image: videoMedia.image, opacity: videoOpacity,
-                               color: NSColor(hex: videoFadeColorHex), visible: videoState.active)
+                               color: NSColor(hex: videoFadeColorHex), visible: videoVisible)
         if now - lastDeviceCheck > 2 {
             lastDeviceCheck = now; store.devices.refresh()
             store.library.refreshIfChanged(project: project, directory: store.directory)
             store.rememberDeviceIdentities()
             reconnectDevices()
         }
-        if videoGate.active || audioGate.active { beginActivity() } else { endActivity() }
+        if videoGate.active || audioGate.active || output.displayID != nil { beginActivity() } else { endActivity() }
         objectWillChange.send()
     }
     /// Wait for metadata, then calculate against the current wall clock rather than launch time.
@@ -385,15 +414,16 @@ final class PlaybackEngine: ObservableObject {
         recoveryLanes.remove(lane)
     }
     func reconnectDevices() {
-        guard let store else { return }
-        if videoGate.active && videoGate.phase != .fadingOut {
+        guard !controlWindowClosed, let store else { return }
+        // Keep the selected display covered in black even between scheduled playbacks.
+        if !shuttingDown {
             if store.selectedDisplay == nil {
                 if output.displayID != nil {
                     output.close(); store.devices.restoreModes()
                     appliedDisplay = nil; appliedRate = nil
                 }
                 videoDisconnected = store.project.displayID != nil || store.project.displayUUID != nil
-            } else if videoDisconnected || appliedDisplay != store.selectedDisplay?.id || appliedRate != store.project.refreshRate {
+            } else if videoDisconnected || output.displayID != store.selectedDisplay?.id || appliedDisplay != store.selectedDisplay?.id || appliedRate != store.project.refreshRate {
                 do {
                     try openVideo(); videoDisconnected = false
                     store.message = "映像出力先へ自動接続しました。"

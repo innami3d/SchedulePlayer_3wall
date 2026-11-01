@@ -66,7 +66,7 @@ struct WorkspaceView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 6))
             VStack(alignment: .leading, spacing: 7) {
                 Text("送出プレビュー").font(.headline)
-                Text(store.project.playlist(engine.videoState.playlistID)?.name ?? "映像は停止中")
+                Text(store.project.playlist(engine.videoState.playlistID)?.name ?? "黒画面で待機中")
                     .font(.callout).lineLimit(1)
                 Text("4K固定 · \(store.project.refreshRate.formatted()) Hz")
                     .font(.caption).monospacedDigit().foregroundStyle(.secondary)

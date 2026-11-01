@@ -30,7 +30,7 @@ final class VideoSurface: NSView {
     }
     func update(player: AVPlayer, image: NSImage?, opacity: Double, color: NSColor, visible: Bool) {
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        layer?.backgroundColor = color.cgColor
+        layer?.backgroundColor = (visible ? color : NSColor.black).cgColor
         if playerLayer.player !== player { playerLayer.player = player }
         var rect = CGRect(origin: .zero, size: image?.size ?? .zero)
         imageLayer.contents = image?.cgImage(forProposedRect: &rect, context: nil, hints: nil)
@@ -67,6 +67,6 @@ struct PreviewSurface: NSViewRepresentable {
     func makeNSView(context: Context) -> VideoSurface { VideoSurface(frame: .zero) }
     func updateNSView(_ view: VideoSurface, context: Context) {
         view.update(player: engine.videoMedia.player, image: engine.videoMedia.image, opacity: engine.videoOpacity,
-                    color: NSColor(hex: engine.videoFadeColorHex), visible: engine.videoState.active)
+                    color: NSColor(hex: engine.videoFadeColorHex), visible: engine.videoVisible)
     }
 }

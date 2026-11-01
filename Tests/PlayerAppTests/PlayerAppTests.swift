@@ -646,3 +646,98 @@ extension PlayerAppTests {
         XCTAssertEqual(engine.videoMedia.player.volume, 0)
     }
 }
+
+extension PlayerAppTests {
+    @MainActor func testVideoSurfaceAlwaysBlacksOutWhenNoMediaIsVisible() throws {
+        let surface = VideoSurface(frame: NSRect(x: 0, y: 0, width: 160, height: 90))
+        let player = AVPlayer()
+        surface.update(player: player, image: nil, opacity: 1, color: .red, visible: true)
+        XCTAssertEqual(NSColor(cgColor: try XCTUnwrap(surface.layer?.backgroundColor)), .red)
+        // Waiting/stopped output must not show the last playlist's custom fade color.
+        surface.update(player: player, image: nil, opacity: 1, color: .red, visible: false)
+        let color = try XCTUnwrap(NSColor(cgColor: try XCTUnwrap(surface.layer?.backgroundColor))?.usingColorSpace(.sRGB))
+        XCTAssertEqual(color.redComponent, 0); XCTAssertEqual(color.greenComponent, 0); XCTAssertEqual(color.blueComponent, 0)
+        XCTAssertEqual(surface.layer?.sublayers?.first?.opacity, 0)
+    }
+    @MainActor func testCalendarGapAndScheduledEndReturnToBlackPreview() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("still.png")
+        let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 8, pixelsHigh: 8, bitsPerSample: 8,
+                                      samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                      colorSpaceName: .calibratedRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        try bitmap.representation(using: .png, properties: [:])!.write(to: url)
+        let store = PlayerStore(restoreLastProject: false)
+        let engine = store.engine
+        defer { engine.stopImmediately() }
+        engine.tick()
+        XCTAssertFalse(engine.videoVisible)
+        XCTAssertEqual(engine.videoOpacity, 0)
+        XCTAssertTrue(engine.status.contains("黒画面で待機"))
+        var playlist = Playlist(name: "White fade", lane: .video)
+        playlist.playbackSettings.fadeColorHex = "#FFFFFF"
+        playlist.tracks = [.init(path: url.path, kind: .image, imageDuration: 120)]
+        let now = Date()
+        let entry = CalendarEntry(playlistID: playlist.id, start: now.addingTimeInterval(-5), end: now.addingTimeInterval(30), fades: .init(fadeIn: 0, fadeOut: 2))
+        store.project.playlists = [playlist]; store.project.calendarEntries = [entry]
+        store.prepareMedia()
+        for _ in 0..<100 {
+            if store.library.prepared(url) != nil { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        engine.resetSchedule(reconcile: true); engine.tick()
+        XCTAssertTrue(engine.videoVisible)
+        XCTAssertEqual(engine.videoOpacity, 1)
+        let clock = ProcessInfo.processInfo.systemUptime
+        engine.tick(date: entry.end.addingTimeInterval(0.1), now: clock)
+        XCTAssertTrue(engine.videoVisible, "Keep the image visible while its scheduled fade-out completes")
+        engine.tick(date: entry.end.addingTimeInterval(2.2), now: clock + 2.1)
+        XCTAssertFalse(engine.videoVisible)
+        XCTAssertEqual(engine.videoOpacity, 0)
+        XCTAssertTrue(engine.status.contains("黒画面で待機"))
+    }
+}
+
+extension PlayerAppTests {
+    @MainActor func testControlCloseWaitsForTerminationAndForcedCloseStopsAllPlayback() {
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: -10000, y: -10000, width: 200, height: 100), styleMask: [.titled, .closable], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+        let store = PlayerStore(restoreLastProject: false)
+        let engine = store.engine
+        var requested = 0
+        let coordinator = ControlWindowCoordinator { requested += 1 }
+        coordinator.attach(window, engine: engine)
+        engine.startProject()
+        XCTAssertTrue(engine.outputIsActive)
+        XCTAssertFalse(coordinator.windowShouldClose(window), "The control window must stay until termination is approved")
+        XCTAssertEqual(requested, 1)
+        XCTAssertTrue(engine.outputIsActive, "Cancelling the termination request must leave playback intact")
+        coordinator.windowWillClose(Notification(name: NSWindow.willCloseNotification, object: window))
+        XCTAssertFalse(engine.outputIsActive)
+        XCTAssertFalse(engine.hasVideoOutput)
+        XCTAssertNil(engine.videoMedia.player.currentItem)
+        XCTAssertNil(engine.audioMedia.player.currentItem)
+        // Neither a queued timer tick nor a new schedule/manual command may restart output.
+        engine.resetSchedule(reconcile: true)
+        engine.startClock()
+        engine.startProject()
+        engine.tick(date: Date().addingTimeInterval(60))
+        XCTAssertFalse(engine.outputIsActive)
+        XCTAssertFalse(engine.hasVideoOutput)
+        window.delegate = nil
+        window.close()
+    }
+    @MainActor func testExternalOutputCannotOpenWithoutAControlWindow() throws {
+        let store = PlayerStore(restoreLastProject: false)
+        guard let display = store.devices.displays.first else { throw XCTSkip("No screen available") }
+        store.project.displayID = display.id; store.project.displayUUID = display.uuid
+        let engine = store.engine
+        defer { engine.stopImmediately() }
+        engine.reconnectDevices()
+        XCTAssertFalse(engine.hasVideoOutput)
+        XCTAssertTrue(engine.videoDisconnected)
+        XCTAssertTrue(store.message.contains("操作ウィンドウが開いていない"))
+    }
+}

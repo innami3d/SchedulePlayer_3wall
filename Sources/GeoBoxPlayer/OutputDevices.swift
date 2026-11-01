@@ -75,13 +75,14 @@ final class OutputDevices: ObservableObject {
         originalModes.removeAll()
     }
     enum DeviceError: LocalizedError {
-        case missingDisplay, unsupportedMode, modeFailed, missingAudio
+        case missingDisplay, unsupportedMode, modeFailed, missingAudio, missingControlWindow
         var errorDescription: String? {
             switch self {
             case .missingDisplay: return "映像出力先が接続されていません。"
             case .unsupportedMode: return "選択した出力先に、指定した送出リフレッシュレートの4Kモードがありません。"
             case .modeFailed: return "4K出力モードへ切り替えられませんでした。"
             case .missingAudio: return "選択した音声出力先が接続されていません。"
+            case .missingControlWindow: return "操作ウィンドウが開いていないため映像を送出できません。"
             }
         }
     }

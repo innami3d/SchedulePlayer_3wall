@@ -46,7 +46,7 @@ struct ProjectSettingsView: View {
                             ForEach(rates, id: \.self) { rate in Text("\(rate.formatted()) Hz").tag(rate) }
                         }.fieldHover()
                     }
-                    Text("出力開始時に4K信号へ切り替え、終了時に元の画面設定へ戻します。素材のfpsは変更しません。")
+                    Text("出力先を設定すると4K信号へ切り替え、解除またはアプリ終了時に元の画面設定へ戻します。再生のない時間は黒画面を送出します。素材のfpsは変更しません。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("音声出力") {
